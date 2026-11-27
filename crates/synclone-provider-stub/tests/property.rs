@@ -262,9 +262,11 @@ impl World {
                 if src.is_file() {
                     std::fs::rename(&src, &dst).unwrap();
                 } else if src_stub.is_file() {
-                    std::fs::rename(&src_stub, &dst_stub).unwrap();
                     // The placeholder still stands for the same cloud file.
-                    if let Some(c) = self.seen_remote.remove(from) {
+                    let stands_for = self.placeholder_content(from);
+                    std::fs::rename(&src_stub, &dst_stub).unwrap();
+                    self.seen_remote.remove(from);
+                    if let Some(c) = stands_for {
                         self.seen_remote.insert(to.to_string(), c);
                     }
                 } else {
