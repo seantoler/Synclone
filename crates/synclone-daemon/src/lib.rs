@@ -349,8 +349,16 @@ impl Daemon {
                 let drives = e.drives()?;
                 let pending = e.db.ops(Some("pending"))?.len();
                 let failed = e.db.ops(Some("failed"))?.len();
-                let state = if failed > 0 || e.db.conflicts(false)?.iter().any(|_| false) {
+                let conflicts = e.db.conflicts(false)?.len();
+                let mut unsyncable = 0;
+                for d in &drives {
+                    unsyncable += e.db.unsyncable_items(d.id)?.len();
+                }
+                let all_paused = !drives.is_empty() && drives.iter().all(|d| d.paused);
+                let state = if failed > 0 || conflicts > 0 || unsyncable > 0 {
                     "Attention needed"
+                } else if all_paused {
+                    "Paused"
                 } else if pending > 0 {
                     "Syncing"
                 } else {
@@ -364,7 +372,8 @@ impl Daemon {
                     "failed": failed,
                     "drives": drives.len(),
                     "trash": e.trash_summary()?,
-                    "conflicts": e.db.conflicts(false)?.len(),
+                    "conflicts": conflicts,
+                    "unsyncable": unsyncable,
                     "rclone": format!("{:?}", self.rclone.state()),
                     "sync_root": self.config.sync_root,
                 })
