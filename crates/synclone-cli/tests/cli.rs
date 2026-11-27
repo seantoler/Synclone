@@ -381,8 +381,10 @@ fn every_user_action_through_the_cli() {
 fn kill_and_restart_resumes_in_flight_operations() {
     let mut e = Env::new();
     // Slow transfers so the kill lands mid-upload.
+    // --local-no-clone: on macOS rclone copies local to local with APFS
+    // clonefile, which is instant and ignores the bandwidth limit.
     e.extra_env
-        .push(("SYNCLONE_RCLONE_ARGS".into(), "--bwlimit 512k".into()));
+        .push(("SYNCLONE_RCLONE_ARGS".into(), "--bwlimit 512k --local-no-clone".into()));
     e.start();
     e.add_local_drive("Cloud");
     e.ctl(&["sync"]);
