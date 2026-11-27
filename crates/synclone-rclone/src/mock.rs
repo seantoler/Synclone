@@ -50,6 +50,7 @@ struct Inner {
     oauth: Option<(String, OAuthOutcome)>,
     bwlimit: String,
     clock_offset_secs: i64,
+    latency_ms: u64,
 }
 
 /// See the module docs.
@@ -308,6 +309,19 @@ impl MockRclone {
                 status: Some(status),
                 message: format!("injected {kind:?}"),
             });
+        }
+    }
+
+    /// Make every stat and transfer take `ms`, so concurrent operations
+    /// really interleave (as they do against a real cloud).
+    pub fn set_latency(&self, ms: u64) {
+        self.inner.lock().unwrap().latency_ms = ms;
+    }
+
+    async fn pause(&self) {
+        let ms = self.inner.lock().unwrap().latency_ms;
+        if ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
         }
     }
 
@@ -751,6 +765,7 @@ impl RcloneApi for MockRclone {
 
     async fn stat(&self, fs: &str, remote: &str, opts: &ListOpts) -> Result<Option<RemoteEntry>> {
         self.enter("operations/stat")?;
+        self.pause().await;
         if is_local(fs) {
             let p = Path::new(fs).join(remote);
             return Ok(std::fs::metadata(&p).ok().map(|m| RemoteEntry {
@@ -828,12 +843,14 @@ impl RcloneApi for MockRclone {
 
     async fn copyfile(&self, src_fs: &str, src_remote: &str, dst_fs: &str, dst_remote: &str) -> Result<()> {
         self.enter("operations/copyfile")?;
+        self.pause().await;
         let (data, t) = self.read_any(src_fs, src_remote, "operations/copyfile")?;
         self.write_any(dst_fs, dst_remote, &data, t, "operations/copyfile")
     }
 
     async fn movefile(&self, src_fs: &str, src_remote: &str, dst_fs: &str, dst_remote: &str) -> Result<()> {
         self.enter("operations/movefile")?;
+        self.pause().await;
         if src_fs == dst_fs && !is_local(src_fs) {
             if !self.exists(src_fs, src_remote) {
                 return Err(not_found("operations/movefile", "object not found"));
@@ -854,6 +871,7 @@ impl RcloneApi for MockRclone {
 
     async fn deletefile(&self, fs: &str, remote: &str) -> Result<()> {
         self.enter("operations/deletefile")?;
+        self.pause().await;
         self.store_for(fs)?;
         let mut g = self.inner.lock().unwrap();
         let removed = g

@@ -57,7 +57,11 @@ pub async fn harness_with(setup_cloud: impl FnOnce(&Path)) -> H {
         .try_init();
     let n = N.fetch_add(1, Ordering::Relaxed);
     let tag = format!("{}-{n}", std::process::id());
-    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("w{tag}"));
+    let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    if n == 0 {
+        sweep_leftovers(&tmp);
+    }
+    let base = tmp.join(format!("w{tag}"));
     let _ = std::fs::remove_dir_all(&base);
     let cloud = base.join("cloud");
     let root = base.join("Synclone");
@@ -94,8 +98,15 @@ pub async fn harness_with(setup_cloud: impl FnOnce(&Path)) -> H {
     cfg.account = format!("test-{tag}");
     cfg.display_name = format!("Synclone test {tag}");
     cfg.list_wait = Duration::from_secs(15);
-    let prov =
-        Arc::new(WindowsProvider::start(cfg, db.clone(), rclone.endpoint().clone()).expect("sync root registers"));
+    // One registration at a time across the parallel tests.
+    static REGISTER: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let prov = {
+        let _g = REGISTER.lock().unwrap_or_else(|e| e.into_inner());
+        Arc::new(
+            WindowsProvider::start(cfg, db.clone(), rclone.endpoint().clone())
+                .unwrap_or_else(|e| panic!("sync root registers: {e:#}")),
+        )
+    };
     let settings = EngineSettings {
         debounce_ms: 300,
         open_retry_ms: 500,
@@ -142,6 +153,55 @@ pub async fn harness_with(setup_cloud: impl FnOnce(&Path)) -> H {
         prov,
         d,
         tasks,
+    }
+}
+
+/// Remove what earlier test processes could not: their directories (files
+/// still open when they dropped) and their sync root registrations. Only
+/// `w<pid>-<n>` folders in Cargo's temp dir and `Synclone` roots with a
+/// `test-<pid>-<n>` account, and only when that process is gone.
+fn sweep_leftovers(tmp: &Path) {
+    let dead = |pid: u32| pid != std::process::id() && !process_alive(pid);
+    let pid_of = |s: &str| s.split('-').next().and_then(|p| p.parse::<u32>().ok());
+    if let Ok(roots) = cloud_filter::root::active_roots() {
+        for r in roots {
+            let id = r.id();
+            // `provider!sid!account`; other apps' roots may use any format.
+            let s = id.to_os_string().to_string_lossy().to_string();
+            let mut parts = s.split('!');
+            let (provider, account) = (parts.next().unwrap_or(""), parts.nth(1).unwrap_or(""));
+            if provider == APP_NAME {
+                if let Some(pid) = account.strip_prefix("test-").and_then(pid_of) {
+                    if dead(pid) {
+                        let _ = id.unregister();
+                    }
+                }
+            }
+        }
+    }
+    if let Ok(rd) = std::fs::read_dir(tmp) {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            if let Some(pid) = name.strip_prefix('w').and_then(pid_of) {
+                if dead(pid) {
+                    let _ = std::fs::remove_dir_all(e.path());
+                }
+            }
+        }
+    }
+}
+
+fn process_alive(pid: u32) -> bool {
+    use windows::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+    use windows::Win32::System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    unsafe {
+        let Ok(h) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+            return false;
+        };
+        let mut code = 0u32;
+        let ok = GetExitCodeProcess(h, &mut code).is_ok();
+        let _ = CloseHandle(h);
+        ok && code == STILL_ACTIVE.0 as u32
     }
 }
 

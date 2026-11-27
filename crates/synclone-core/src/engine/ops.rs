@@ -40,6 +40,23 @@ impl Engine {
             .map(|d| d.id)
             .collect();
         due.retain(|op| !paused.contains(&op.drive_id) && seen.insert((op.drive_id, op.path.clone())));
+        // A local rename runs alone on its paths: anything else touching the
+        // old or new name waits until the move is done and the DB says where
+        // the item is now. (Run side by side, a reconcile of the old name
+        // could take the renamed item for a delete and queue it for the trash.)
+        let mut moves: Vec<Op> = self
+            .db
+            .ops(Some("running"))?
+            .into_iter()
+            .filter(|o| o.kind == "move")
+            .collect();
+        moves.extend(due.iter().filter(|o| o.kind == "move").cloned());
+        due.retain(|op| {
+            op.kind == "move"
+                || !moves
+                    .iter()
+                    .any(|m| m.drive_id == op.drive_id && move_involves(m, &op.path))
+        });
         let mut report = RunReport::default();
         let results: Vec<Result<OpResult>> = stream::iter(due.into_iter().map(|op| self.run_op(op)))
             .buffer_unordered(self.settings.concurrency.max(1))
@@ -198,6 +215,13 @@ impl Engine {
         self.poll_drive(drive_id).await?;
         self.run_until_idle(true, 100).await
     }
+}
+
+/// Whether the move op `m` covers `p`: its source or destination, or
+/// anything beneath either (the same test as `pending_move_involving`).
+fn move_involves(m: &Op, p: &RelPath) -> bool {
+    let from = m.payload.get("from").and_then(|f| f.as_str()).and_then(RelPath::new);
+    p.starts_with(&m.path) || from.map(|f| p.starts_with(&f)).unwrap_or(false)
 }
 
 enum OpResult {

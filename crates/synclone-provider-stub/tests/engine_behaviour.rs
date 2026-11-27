@@ -609,3 +609,41 @@ async fn child_deletes_reported_with_the_drive_folder_gone_are_a_disconnect() {
     assert_eq!(h.mock.remote_write_calls(), 0, "calls: {:?}", h.mock.calls());
     assert_eq!(h.remote("a.txt").unwrap(), b"a");
 }
+
+/// Windows reports a rename both as a rename and, through its watcher, as a
+/// change at the old name. Run in the same batch as the move, a reconcile of
+/// the old name must not take the renamed item for a delete.
+#[tokio::test]
+async fn rename_reported_together_with_a_change_at_the_old_name_is_not_a_delete() {
+    let h = harness().await;
+    h.put("a/one.txt", b"one");
+    h.sync().await;
+    std::fs::rename(
+        format!("{}{}", h.local("a/one.txt").display(), synclone_provider_stub::STUB_EXT),
+        format!("{}{}", h.local("a/uno.txt").display(), synclone_provider_stub::STUB_EXT),
+    )
+    .unwrap();
+    for ev in [
+        ProviderEvent::LocalRenamed {
+            drive: h.d.id,
+            from: rp("a/one.txt"),
+            to: rp("a/uno.txt"),
+        },
+        ProviderEvent::LocalModified {
+            drive: h.d.id,
+            path: rp("a/one.txt"),
+        },
+        ProviderEvent::LocalModified {
+            drive: h.d.id,
+            path: rp("a/uno.txt"),
+        },
+    ] {
+        h.eng.handle_event(ev).unwrap();
+    }
+    h.mock.set_latency(30);
+    h.clock.advance(10_000);
+    h.eng.run_until_idle(false, 20).await.unwrap();
+    assert!(h.eng.trash_list().unwrap().is_empty(), "{:?}", h.eng.trash_list());
+    assert_eq!(h.remote("a/uno.txt").unwrap(), b"one");
+    assert!(h.remote("a/one.txt").is_none());
+}

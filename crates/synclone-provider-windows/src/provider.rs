@@ -300,8 +300,11 @@ impl WindowsProvider {
                 id.unregister().context("moving the Synclone folder")?;
             }
         }
-        id.register(
-            SyncRootInfo::default()
+        // Registration goes through WinRT, which can fail transiently
+        // (seen with several registrations at once): retry briefly.
+        let mut attempt = 0;
+        loop {
+            let info = SyncRootInfo::default()
                 .with_display_name(&cfg.display_name)
                 .with_icon(&cfg.icon)
                 .with_version(VERSION)
@@ -310,9 +313,17 @@ impl WindowsProvider {
                 .with_protection_mode(ProtectionMode::Personal)
                 .with_allow_pinning(true)
                 .with_show_siblings_as_group(false)
-                .with_path(&root)?,
-        )
-        .context("registering the Synclone folder with Windows")?;
+                .with_path(&root)?;
+            match id.register(info) {
+                Ok(()) => break,
+                Err(e) if attempt < 4 => {
+                    attempt += 1;
+                    tracing::info!("registering the Synclone folder (attempt {attempt}): {e}");
+                    std::thread::sleep(Duration::from_millis(300 * attempt));
+                }
+                Err(e) => return Err(anyhow!(e).context("registering the Synclone folder with Windows")),
+            }
+        }
         let (tx, rx) = unbounded_channel();
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)

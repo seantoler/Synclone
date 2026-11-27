@@ -146,3 +146,41 @@ The rclone login never leaves the daemon. Every path is overridable by environme
 ## D-020 Property-test model: what a placeholder stands for
 
 The no-loss invariant exempts content the user overwrote on their own side. Writing over a placeholder overwrites the file that placeholder stands for. The model identifies that file by the version the engine last recorded at the path (matched by content hash), not by the model's own last view of the cloud. The difference showed up in a Windows CI seed (now kept in `property.proptest-regressions`), where the engine had uploaded and then freed a file without a poll in between. Neither this nor the earlier model fixes changed what counts as loss of data the user didn't overwrite.
+
+## D-021 Phase 4 spike: `cloud-filter` 0.1.0, and what Windows actually does
+
+The spike used `cloud-filter` 0.1.0 (MIT, Nov 2026, on `windows` 0.62) instead of raw `windows` bindings. It is no longer the stale 0.0.x the plan worried about. It wraps registration (WinRT and native), callbacks, tickets, placeholders, pin state, in-sync state and a `ReadDirectoryChangesW` watcher. The crate's MSRV is 1.93, so only `synclone-provider-windows` raises `rust-version`. A throwaway example on the Windows 11 PC observed:
+
+- Registering a sync root under `target/` works. Windows refuses roots under `%TEMP%`, so layer 3 tests live in `target/tmp`.
+- File attributes: a dehydrated file is `OFFLINE | RECALL_ON_DATA_ACCESS` (0x401000 among others), pinned is 0x80000 and unpinned is 0x100000. A partially populated folder also carries `RECALL_ON_DATA_ACCESS`. Hydration leaves the mtime as the placeholder's.
+- Callbacks (fetch placeholders, delete, rename) fire only for other processes. The provider's own renames, deletes and enumerations raise none; the watcher still reports them. So the provider's own operations need no echo suppression on the callback side, and its scans never make Windows fill a folder.
+- The sync root itself gets `FETCH_PLACEHOLDERS` first, so drive folders are served there as placeholders.
+- A shell "send to Recycle Bin" of a placeholder folder arrives as DELETE, undelete, DELETE on the folder alone, with no per-child callbacks.
+- `attrib +U` produces no dehydrate callback: the provider must free files itself.
+- Handles: `CfConvertToPlaceholder` and metadata updates reject `CfOpenFileWithOplock` handles ("The handle is invalid"). An attribute-only Win32 handle works for convert, update and hydrate, but it also lets a dehydrate succeed while another program reads the file. Anything that drops content therefore uses an exclusive handle (read/write with no sharing, or an exclusive oplock handle); both fail while another program has the file open. Identity, metadata and in-sync changes use attribute-only handles, which never hydrate and never conflict.
+
+## D-022 Windows layout and how user actions map to the engine
+
+- **One sync root:** provider name `Synclone`, account `default`, display name `Synclone`, full hydration, full population, pinning allowed, no auto-dehydration. Explorer's navigation pane comes from the WinRT registration. A different account (`SYNCLONE_SYNC_ROOT_ACCOUNT`) gives tests their own root, so they never touch the user's.
+- **Drive folders and subfolders:** each drive folder is an on-demand placeholder folder directly in the root. `FETCH_PLACEHOLDERS` is answered from the state DB. If the folder was never indexed, the callback emits `FolderEnumerated` and waits (up to 20 s) for the engine's listing; a second pass after completion adds anything indexed meanwhile. `is_populated` is "not a partial placeholder folder", so the engine creates placeholders only where Explorer has looked (§4.2).
+- **Placeholder identity:** each placeholder's blob is `{d: drive, s: size, m: mtime}`. The DB stays the source of truth.
+- **Deletes** are allowed locally. The `deleted` notification becomes `LocalDeleted`, and the engine queues the trash entry (§4.6). A drive folder deleted, or moved out of the root, is checked 1.5 s later (after the Recycle Bin's delete/undelete/delete); if it is gone, that is `DriveRootRemoved`.
+- **Renames** inside a drive become `LocalRenamed`. A drive folder renamed to a usable name not used by another drive becomes `DriveRootRenamed`. Moving a placeholder or a folder out of its drive is refused, because it would arrive without content. A downloaded file may leave its drive: that is a delete there and a new file wherever it lands.
+- **Pins:** a pin attribute change seen by the watcher (compared with the last one seen, and with the provider's own pin changes recorded first) becomes `PinRequested` (folders recursive, dehydrated files) or `FreeRequested`. Every other watcher path is `LocalModified`, and the engine re-derives what happened.
+- **Dehydrate callbacks** (Storage Sense, other programs) are refused unless the file is marked unpinned by the user: downloads stay.
+
+## D-023 Windows hydration: two paths into one placeholder
+
+- **A program opens a placeholder:** `FETCH_DATA` streams the object from rclone's `--rc-serve` (`RcClient::open_read`) in 1 MiB chunks with `CfReportProviderProgress`, so Explorer shows native progress and the 60 s timeout never fires. If the cloud's size differs from the placeholder's, the open fails cleanly and the engine updates the placeholder (rule 1). Then a new `Hydrated` event tells the engine, which records a downloaded copy of the version on record without transferring again, and pins it. The provider has its own two-thread runtime and rc client, so hydration never waits for a free engine worker.
+- **The engine downloads** (save to device, rule 2, conflicts): `copyfile` to staging as on every OS, with size and hash checks. `commit_download` then turns the target into a dehydrated placeholder with the new size and time. A downloaded copy is dropped only through an exclusive handle, after re-checking the fingerprint. The provider then calls `CfHydratePlaceholder`, and its own `FETCH_DATA` serves the staged file. Windows writes the content, and the file keeps its identity.
+- **Marking in sync:** `set_state(Downloaded)` marks in sync only if the file still matches the engine's recorded fingerprint, so a write during an upload stays pending in Explorer as well. A file still open in another program is retried in the background.
+- **Is it open:** a read open that shares only reading, with `FILE_FLAG_OPEN_NO_RECALL`. It fails with a sharing violation while anyone has the file open for writing. Placeholders are never opened.
+- **Remote deletes (rule 6):** a downloaded copy is reverted to an ordinary file and sent to the Recycle Bin (`SHFileOperationW`, `FOF_ALLOWUNDO`). Placeholders are simply removed.
+
+## D-024 Daemon provider selection
+
+`SYNCLONE_PROVIDER` selects `native` (the Windows provider; the default on Windows) or `stub` (plain folders; the default elsewhere until Phase 6). The scan loop runs every 60 s with the native provider, as a safety net behind OS events, and every 5 s with the stub. The CLI end-to-end tests set `stub`: they assert the stub's plain folders and use `%TEMP%`, where Windows refuses sync roots. The Windows provider has its own layer 3 suite, and the Windows kill-and-restart test runs through the CLI.
+
+## D-025 A rename runs alone on its paths
+
+Found by the Windows layer 3 suite (about 1 run in 3). Windows reports a rename as a rename (the move op) and, through the watcher, as a change at the old and new names (reconcile ops). `run_due` runs one batch concurrently with only same-path deduplication. A reconcile of the old name could start while the move op was already `running`. `pending_move_involving` only counts `pending` moves, so the renamed item looked deleted and went into the trash queue, even though the cloud rename succeeded. Emptying the trash would then have found nothing to delete, but the entry was wrong. `run_due` now holds back any non-move op covered by a move in the same batch or one still running; it runs next round, once the DB says where the item is. The guard inside `reconcile` stays `pending`-only, because the move op reconciles its own destination. Regression test: `rename_reported_together_with_a_change_at_the_old_name_is_not_a_delete`. It needed `MockRclone::set_latency` so that operations really interleave, as they do against a real cloud.

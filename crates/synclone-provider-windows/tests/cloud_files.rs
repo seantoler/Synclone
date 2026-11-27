@@ -212,7 +212,13 @@ async fn renames_and_moves_apply_in_the_cloud() {
     })
     .await;
     assert_eq!(h.cloud_file("a/uno.txt").unwrap(), b"one");
-    assert!(h.eng.trash_list().unwrap().is_empty());
+    let trash = h.eng.trash_list().unwrap();
+    assert!(
+        trash.is_empty(),
+        "trash: {trash:?}
+activity: {:?}",
+        h.eng.db.activity(30).unwrap()
+    );
 }
 
 /// Deleting goes to Synclone's trash queue; the cloud keeps the file until
@@ -358,4 +364,75 @@ async fn renaming_the_drive_folder_renames_the_drive() {
     assert_eq!(h.eng.drive(h.d.id).unwrap().state, DriveState::Connected);
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     assert_eq!(h.cloud_snapshot(), before);
+}
+
+/// Write `gib` GiB of non-repeating blocks to `path`.
+fn write_big(path: &std::path::Path, gib: u64) {
+    use std::io::Write;
+    let mut f = std::io::BufWriter::with_capacity(8 << 20, std::fs::File::create(path).unwrap());
+    let mut block = vec![0u8; 1 << 20];
+    for (i, b) in block.iter_mut().enumerate() {
+        *b = (i.wrapping_mul(2654435761) >> 13) as u8;
+    }
+    for n in 0..gib * 1024 {
+        block[..8].copy_from_slice(&n.to_le_bytes());
+        f.write_all(&block).unwrap();
+    }
+    f.flush().unwrap();
+}
+
+fn md5_of(path: &std::path::Path) -> String {
+    ps(&format!("(Get-FileHash -Algorithm MD5 -LiteralPath {}).Hash", q(path)))
+}
+
+/// Phase 4 exit: a 5 GB file hydrates (opened by another program, streamed
+/// from rclone) and a 5 GB local file uploads, both intact. Writes about
+/// 20 GB, so it runs only with SYNCLONE_BIG_FILE_TEST=1.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn five_gigabyte_file_hydrates_and_uploads() {
+    require_cloud_files!();
+    if std::env::var("SYNCLONE_BIG_FILE_TEST").as_deref() != Ok("1") {
+        eprintln!("SKIPPED: set SYNCLONE_BIG_FILE_TEST=1 to run the 5 GB test (needs about 20 GB free)");
+        return;
+    }
+    const GIB: u64 = 5;
+    let h = harness_with(|c| write_big(&c.join("audiobook.m4b"), GIB)).await;
+    names(&h.local(""));
+    let local = h.local("audiobook.m4b");
+    assert!(is_dehydrated(&local));
+    assert_eq!(std::fs::metadata(&local).unwrap().len(), GIB << 30);
+
+    let t = std::time::Instant::now();
+    let local_md5 = md5_of(&local); // reading it hydrates it
+    let hydrate_secs = t.elapsed().as_secs_f64();
+    assert_eq!(
+        local_md5,
+        md5_of(&h.cloud_path("audiobook.m4b")),
+        "hydrated content matches"
+    );
+    assert!(!is_dehydrated(&local));
+    wait_for("recorded as downloaded", 30, || {
+        h.item("audiobook.m4b").map(|i| i.local_state) == Some(LocalState::Downloaded)
+    })
+    .await;
+
+    let t = std::time::Instant::now();
+    write_big(&h.local("recording.wav"), GIB);
+    let src_md5 = md5_of(&h.local("recording.wav"));
+    wait_for("5 GB upload", 900, || {
+        h.item("recording.wav")
+            .map(|i| i.synced.is_some() && !i.dirty)
+            .unwrap_or(false)
+    })
+    .await;
+    let upload_secs = t.elapsed().as_secs_f64();
+    assert_eq!(
+        md5_of(&h.cloud_path("recording.wav")),
+        src_md5,
+        "uploaded content matches"
+    );
+    eprintln!(
+        "RESULT: 5 GiB hydrated in {hydrate_secs:.1} s (incl. hashing), written + uploaded in {upload_secs:.1} s"
+    );
+    drop(h);
 }
