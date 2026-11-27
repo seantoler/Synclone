@@ -1,0 +1,50 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/synclone-core",
+    "crates/synclone-rclone",
+    "crates/synclone-daemon",
+    "crates/synclone-cli",
+    "crates/synclone-provider-stub",
+    "crates/synclone-provider-windows",
+    "crates/synclone-provider-macos",
+    "crates/synclone-app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+anyhow = "1"
+async-trait = "0.1"
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
+clap = { version = "4", features = ["derive"] }
+dirs = "6"
+gethostname = "1"
+futures = "0.3"
+globset = "0.4"
+md-5 = "0.10"
+proptest = "1"
+rand = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+libc = "0.2"
+
+synclone-core = { path = "crates/synclone-core" }
+synclone-rclone = { path = "crates/synclone-rclone" }
+synclone-daemon = { path = "crates/synclone-daemon" }
+synclone-provider-stub = { path = "crates/synclone-provider-stub" }
+
+[profile.dev.package."*"]
+opt-level = 2

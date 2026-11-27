@@ -1,4 +1,4 @@
-# CloudFolders (working name) — Build Plan
+# Synclone — Build Plan
 
 An open-source, odrive-style multi-cloud sync client for Windows and macOS, written in Rust on top of rclone.
 
@@ -45,7 +45,7 @@ Encryption UI, share links, backup jobs, sync-to-arbitrary-folder, auto-unsync t
 
 ### 1.5 Naming and legal
 
-- Do not use the name "odrive", its icons, or any of its code. "CloudFolders" is a placeholder; keep the name in one constant so it can be renamed in a single commit.
+- Do not use the name "odrive", its icons, or any of its code. The app name is "Synclone"; keep the name in one constant so it can be renamed in a single commit.
 - Do not put "rclone" in the product name: it is reported to be a trademark of rclone's author. Say "built on rclone" and "not affiliated with rclone" in the README.
 - License: MIT OR Apache-2.0 (dual, Rust convention). rclone is MIT; bundle its license notice.
 
@@ -99,14 +99,14 @@ Rules for the agent: read these for design ideas and known pitfalls (their issue
 
 | Crate | Purpose | Platforms |
 |---|---|---|
-| `cf-core` | Domain types, state DB (SQLite via `rusqlite`), sync engine, conflict resolution, trash queue, `Provider` trait. No OS-specific code. | all |
-| `cf-rclone` | Spawn and supervise `rclone rcd`; typed async client for the rc API; `RcloneApi` trait with a mock implementation. | all |
-| `cf-daemon` | Long-running process. Hosts core, owns the DB, exposes JSON-RPC over a named pipe (Windows) or Unix socket (macOS/Linux). | all |
-| `cf-cli` | `cfctl`: every user-facing operation as a command (`drive add/list/remove`, `download`, `free`, `trash list/restore/empty`, `status`, `conflicts`). Exists mainly so the agent can test everything headlessly. | all |
-| `cf-provider-stub` | A `Provider` using plain folders and zero-byte `.cfstub` files. Used for engine tests on Linux and CI. Not shipped to users in v1. | all |
-| `cf-provider-windows` | Cloud Files API sync root provider. | Windows |
-| `cf-provider-macos` | Rust side of the File Provider integration, plus a Swift app-extension shim in `macos/`. | macOS |
-| `cf-app` | Tauri 2 tray / menu bar app and windows (wizard, trash, activity, settings). | Windows, macOS |
+| `synclone-core` | Domain types, state DB (SQLite via `rusqlite`), sync engine, conflict resolution, trash queue, `Provider` trait. No OS-specific code. | all |
+| `synclone-rclone` | Spawn and supervise `rclone rcd`; typed async client for the rc API; `RcloneApi` trait with a mock implementation. | all |
+| `synclone-daemon` | Long-running process. Hosts core, owns the DB, exposes JSON-RPC over a named pipe (Windows) or Unix socket (macOS/Linux). | all |
+| `synclone-cli` | `synclonectl`: every user-facing operation as a command (`drive add/list/remove`, `download`, `free`, `trash list/restore/empty`, `status`, `conflicts`). Exists mainly so the agent can test everything headlessly. | all |
+| `synclone-provider-stub` | A `Provider` using plain folders and zero-byte `.sclstub` files. Used for engine tests on Linux and CI. Not shipped to users in v1. | all |
+| `synclone-provider-windows` | Cloud Files API sync root provider. | Windows |
+| `synclone-provider-macos` | Rust side of the File Provider integration, plus a Swift app-extension shim in `macos/`. | macOS |
+| `synclone-app` | Tauri 2 tray / menu bar app and windows (wizard, trash, activity, settings). | Windows, macOS |
 
 ### 2.4 The `Provider` trait (the key abstraction)
 
@@ -165,7 +165,7 @@ Location: per-user app data directory. One DB, WAL mode.
 
 The same API OneDrive, Google Drive and Dropbox use.
 
-- One sync root for the whole app at `%USERPROFILE%\CloudFolders`, registered so it shows once in the Explorer navigation pane with the app icon. Each cloud drive is a top-level folder inside it (`CloudFolders\Google Drive`, `CloudFolders\OneDrive`, …). The engine maps the first path segment to a drive.
+- One sync root for the whole app at `%USERPROFILE%\Synclone`, registered so it shows once in the Explorer navigation pane with the app icon. Each cloud drive is a top-level folder inside it (`Synclone\Google Drive`, `Synclone\OneDrive`, …). The engine maps the first path segment to a drive.
 - Files cannot live directly in the app root; only cloud-drive folders. A file dropped there is left unsynced and flagged in the tray menu.
 - Rust bindings: start with the `cloud-filter` crate (a wrapper over the Cloud Filter API). It is at version 0.0.x and may be incomplete or stale. **Spike it first.** Fallback: call `CfRegisterSyncRoot`, `CfConnectSyncRoot`, `CfCreatePlaceholders`, `CfExecute` etc. directly through the `windows` crate.
 - Hydration: `FETCH_DATA` callback → stream bytes from rclone → `CfExecute(TRANSFER_DATA)`, with progress reported so Explorer shows its native progress UI.
@@ -184,11 +184,11 @@ The same API OneDrive, Google Drive and Dropbox use.
 
 The same API OneDrive, Google Drive and Dropbox use on modern macOS.
 
-- One `NSFileProviderDomain` for the whole app. macOS decides its location (`~/Library/CloudStorage/CloudFolders`) and shows it once in the Finder sidebar under Locations. Each cloud drive is a top-level folder inside the domain, exactly as on Windows. Item identifiers are `<drive-id>/<remote-id-or-path>`.
+- One `NSFileProviderDomain` for the whole app. macOS decides its location (`~/Library/CloudStorage/Synclone`) and shows it once in the Finder sidebar under Locations. Each cloud drive is a top-level folder inside the domain, exactly as on Windows. Item identifiers are `<drive-id>/<remote-id-or-path>`.
 - Deleting a top-level drive folder in Finder is handled as disconnect (same rules as Windows), never as a remote delete.
 - Structure: a host `.app` containing a File Provider app extension (`.appex`) written as a thin Swift shim. All logic lives in Rust.
   - Preferred: the shim forwards each callback (`item`, `enumerator`, `fetchContents`, `createItem`, `modifyItem`, `deleteItem`) to the daemon over a Unix socket in the shared App Group container. **VERIFY** early that a sandboxed extension can connect to that socket.
-  - Fallback: link `cf-core` into the extension as a static library through a C ABI (`extern "C"`), with the DB in the App Group container.
+  - Fallback: link `synclone-core` into the extension as a static library through a C ABI (`extern "C"`), with the DB in the App Group container.
 - File hand-off: `fetchContents` must return a file URL on the same volume. Download into a staging directory inside the App Group container and return that URL. For uploads the system provides a temporary URL; copy or clone it into staging before the callback returns, then upload from staging.
 - Context menu: Finder supplies **"Download Now"** and **"Remove Download"** for File Provider items, including on folders (recursive). Map these to save-to-device and remove-from-device.
 - "Downloads stay": **VERIFY** which content policy keeps materialized files from being evicted under disk pressure on the target macOS versions (look at `NSFileProviderContentPolicy` and "Keep Downloaded"). Apply it to everything the user downloads.
@@ -286,7 +286,7 @@ Device name in conflict copies comes from the hostname. Conflicts are listed in 
 ### 6.1 Tray / menu bar menu
 
 ```
-CloudFolders — Up to date            (or: Syncing 3 items… / Paused / Attention needed)
+Synclone — Up to date            (or: Syncing 3 items… / Paused / Attention needed)
 ────────────────────────────────
 Google Drive            ▸  Open folder · Refresh · Pause · Disconnect…
 OneDrive                ▸
@@ -344,7 +344,7 @@ Core logic against the mock `RcloneApi` and an in-memory provider. Every row of 
 
 ### Layer 2: engine integration tests (all platforms)
 
-Real `rclone rcd` against rclone's `local` backend pointed at temp directories, with `cf-provider-stub`. Covers: add/remove drive, index, download, pin/free recursion, upload, rename/move, trash queue lifecycle, crash-and-resume from the `ops` journal, rate-limit backoff (injected faults).
+Real `rclone rcd` against rclone's `local` backend pointed at temp directories, with `synclone-provider-stub`. Covers: add/remove drive, index, download, pin/free recursion, upload, rename/move, trash queue lifecycle, crash-and-resume from the `ops` journal, rate-limit backoff (injected faults).
 
 Property test (`proptest`): apply random interleaved operations to the "local" and "remote" sides, run the engine to quiescence, and assert the invariant: **every distinct file content that ever existed is still present locally, remotely, or as a conflict copy, unless it was removed by an explicitly emptied trash entry.**
 
@@ -355,9 +355,9 @@ Property test (`proptest`): apply random interleaved operations to the "local" a
 
 ### Layer 4: live cloud smoke tests (opt-in)
 
-- Run only when `CF_LIVE_TEST_REMOTES` is set.
+- Run only when `SYNCLONE_LIVE_TEST_REMOTES` is set.
 - Two independent barriers protect the owner's real files:
-  1. Live tests never use the real remote directly. For each provider the owner creates a folder `_cloudfolders-test` and an rclone **alias** remote pointing at it (e.g. `gdrive-test` → `gdrive:_cloudfolders-test`). rclone cannot address anything above an alias remote's root, so nothing outside that folder is reachable. `CF_LIVE_TEST_REMOTES` may only list remotes whose type is `alias` and whose target path contains `_cloudfolders-test`; the harness refuses anything else.
+  1. Live tests never use the real remote directly. For each provider the owner creates a folder `_synclone-test` and an rclone **alias** remote pointing at it (e.g. `gdrive-test` → `gdrive:_synclone-test`). rclone cannot address anything above an alias remote's root, so nothing outside that folder is reachable. `SYNCLONE_LIVE_TEST_REMOTES` may only list remotes whose type is `alias` and whose target path contains `_synclone-test`; the harness refuses anything else.
   2. Every path also passes through a `TestRoot` guard in code that refuses operations outside a per-run subfolder.
 - One round trip per provider: upload, list, download, modify, conflict, trash, empty, cleanup.
 
@@ -416,11 +416,11 @@ Cloud-session network note: the sandbox may only reach package registries and Gi
 
 ### Phase 0: Bootstrap (cloud)
 Workspace with all crates stubbed, `CLAUDE.md`, `PROGRESS.md`, `DECISIONS.md`, `HUMAN_TODO.md`, licenses, CI on three OSes, `scripts/fetch-rclone` with checksum verification.
-**Exit:** CI green on all three; `cfctl --version` runs; rclone binary fetched and `core/version` returns ≥ 1.73 through `cf-rclone`.
+**Exit:** CI green on all three; `synclonectl --version` runs; rclone binary fetched and `core/version` returns ≥ 1.73 through `synclone-rclone`.
 
 ### Phase 1: rclone client and drive management (cloud)
 Supervised `rclone rcd` (random port, credentials, restart on crash, clean shutdown). Typed client and mock. Import existing remotes. Add/remove remotes, including the OAuth flow (state machine tested against the mock) and token providers.
-**Exit:** `cfctl drive list/add/remove` works against `local` and `memory` backends; rc is unreachable without credentials (test); all **VERIFY** items in §2.5 resolved.
+**Exit:** `synclonectl drive list/add/remove` works against `local` and `memory` backends; rc is unreachable without credentials (test); all **VERIFY** items in §2.5 resolved.
 
 ### Phase 2: State DB and remote index (cloud)
 Schema and migrations, background crawler, polling differ, rename detection by ID.
@@ -428,7 +428,7 @@ Schema and migrations, background crawler, polling differ, rename detection by I
 
 ### Phase 3: Sync engine with the stub provider (cloud)
 Downloads, pin/free recursion, uploads with debounce and open-file deferral, the full conflict table, trash queue, durable `ops` journal, ignore list.
-**Exit:** every §5 rule has a passing test; property test passes 10,000 cases; kill-and-restart test resumes all in-flight operations; `cfctl` can perform every action in §1.1.
+**Exit:** every §5 rule has a passing test; property test passes 10,000 cases; kill-and-restart test resumes all in-flight operations; `synclonectl` can perform every action in §1.1.
 
 ### Phase 4: Windows provider (Windows PC)
 Spike `cloud-filter` vs. raw `windows` bindings first (one day's worth of effort at most, then decide). Sync root registration, placeholders, streaming hydration with progress, pin/unpin handling, watcher, delete interception, root-removal-as-unmount.
@@ -480,6 +480,6 @@ Answered by the owner:
 - Remote deletes remove the local copy (rule 6), as odrive does.
 - Live smoke tests run in a dedicated test folder in the real accounts, isolated as in §7 layer 4.
 - All cloud drives live as folders inside one app folder, as odrive does.
+- Final app name: **Synclone**.
 
-Still open:
-1. Final app name. (Default: keep the "CloudFolders" placeholder.)
+Still open: none.

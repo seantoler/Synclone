@@ -1,0 +1,10 @@
+[package]
+name = "synclone-provider-macos"
+description = "macOS File Provider integration for Synclone (Phase 6)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
