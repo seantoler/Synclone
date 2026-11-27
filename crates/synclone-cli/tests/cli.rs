@@ -98,11 +98,40 @@ impl Env {
     }
 
     fn try_ctl(&self, args: &[&str]) -> Result<Value, String> {
-        let out = self.cmd().arg("--json").args(args).output().unwrap();
-        if !out.status.success() {
-            return Err(String::from_utf8_lossy(&out.stderr).to_string());
+        // Never hang the test run: give each command two minutes.
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let out_path = self.path(&format!("ctl-{n}.out"));
+        let err_path = self.path(&format!("ctl-{n}.err"));
+        let mut child = self
+            .cmd()
+            .arg("--json")
+            .args(args)
+            .stdout(Stdio::from(std::fs::File::create(&out_path).unwrap()))
+            .stderr(Stdio::from(std::fs::File::create(&err_path).unwrap()))
+            .spawn()
+            .unwrap();
+        let t = Instant::now();
+        loop {
+            if child.try_wait().unwrap().is_some() {
+                break;
+            }
+            if t.elapsed() > Duration::from_secs(120) {
+                let _ = child.kill();
+                panic!(
+                    "synclonectl {args:?} hung for 2 minutes; daemon log:\n{}",
+                    std::fs::read_to_string(self.path("daemon.log")).unwrap_or_default()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(20));
         }
-        let s = String::from_utf8_lossy(&out.stdout);
+        let status = child.wait().unwrap();
+        let stdout = std::fs::read(&out_path).unwrap_or_default();
+        let stderr = std::fs::read(&err_path).unwrap_or_default();
+        if !status.success() {
+            return Err(String::from_utf8_lossy(&stderr).to_string());
+        }
+        let s = String::from_utf8_lossy(&stdout);
         Ok(serde_json::from_str(&s).unwrap_or(Value::String(s.to_string())))
     }
 
