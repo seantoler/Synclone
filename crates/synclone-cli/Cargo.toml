@@ -1,0 +1,24 @@
+[package]
+name = "synclone-cli"
+description = "synclonectl: every Synclone operation as a command"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "synclonectl"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+synclone-core.workspace = true
+synclone-daemon.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+synclone-rclone.workspace = true

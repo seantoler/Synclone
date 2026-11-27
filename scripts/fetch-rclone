@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# Download the pinned rclone release from GitHub and verify its SHA-256
+# against scripts/rclone-checksums.txt (committed, not fetched at run time).
+#
+# Usage: scripts/fetch-rclone [--os linux|osx|windows] [--arch amd64|arm64] [--dest DIR]
+# Default destination: vendor/rclone/<os>-<arch>/rclone[.exe]
+# Prints the path of the binary on success.
+set -euo pipefail
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+root="$(cd "$here/.." && pwd)"
+version="$(tr -d '[:space:]' < "$here/rclone-version.txt")"
+
+case "$(uname -s)" in
+  Linux*) os=linux ;;
+  Darwin*) os=osx ;;
+  MINGW*|MSYS*|CYGWIN*) os=windows ;;
+  *) echo "unsupported OS: $(uname -s)" >&2; exit 1 ;;
+esac
+case "$(uname -m)" in
+  x86_64|amd64) arch=amd64 ;;
+  arm64|aarch64) arch=arm64 ;;
+  *) echo "unsupported CPU: $(uname -m)" >&2; exit 1 ;;
+esac
+dest=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --os) os="$2"; shift 2 ;;
+    --arch) arch="$2"; shift 2 ;;
+    --dest) dest="$2"; shift 2 ;;
+    *) echo "unknown argument: $1" >&2; exit 2 ;;
+  esac
+done
+
+[ -n "$dest" ] || dest="$root/vendor/rclone/$os-$arch"
+exe=rclone; [ "$os" = windows ] && exe=rclone.exe
+name="rclone-$version-$os-$arch"
+zip="$name.zip"
+
+if [ -x "$dest/$exe" ] && [ -f "$dest/.version" ] && [ "$(cat "$dest/.version")" = "$version" ]; then
+  echo "$dest/$exe"
+  exit 0
+fi
+
+expected="$(awk -v f="$zip" '$2 == f { print $1 }' "$here/rclone-checksums.txt")"
+if [ -z "$expected" ]; then
+  echo "no pinned checksum for $zip in scripts/rclone-checksums.txt" >&2
+  exit 1
+fi
+
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+url="https://github.com/rclone/rclone/releases/download/$version/$zip"
+echo "downloading $url" >&2
+curl -fsSL --retry 4 --retry-delay 2 -o "$tmp/$zip" "$url"
+
+if command -v sha256sum >/dev/null 2>&1; then
+  actual="$(sha256sum "$tmp/$zip" | awk '{print $1}')"
+else
+  actual="$(shasum -a 256 "$tmp/$zip" | awk '{print $1}')"
+fi
+if [ "$actual" != "$expected" ]; then
+  echo "checksum mismatch for $zip: expected $expected, got $actual" >&2
+  exit 1
+fi
+
+(cd "$tmp" && unzip -q "$zip")
+mkdir -p "$dest"
+cp "$tmp/$name/$exe" "$dest/$exe"
+cp "$tmp/$name/README.txt" "$dest/README.txt" 2>/dev/null || true
+chmod +x "$dest/$exe"
+echo "$version" > "$dest/.version"
+echo "$dest/$exe"

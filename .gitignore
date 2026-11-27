@@ -1,0 +1,6 @@
+/target
+/vendor
+*.db
+*.db-wal
+*.db-shm
+rclone.conf

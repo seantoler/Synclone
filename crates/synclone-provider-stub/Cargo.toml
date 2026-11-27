@@ -1,0 +1,16 @@
+[package]
+name = "synclone-provider-stub"
+description = "A Provider backed by plain folders and .sclstub files, for engine tests"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+synclone-core.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
