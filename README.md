@@ -26,7 +26,27 @@ cargo test --workspace
 
 ## Command-line tool
 
-`synclonectl` exposes every operation (connecting cloud storage, downloading, freeing space, the trash queue, conflicts). Run `synclonectl --help`.
+`synclonectl` exposes every operation (connecting cloud storage, downloading, freeing space, the trash queue, conflicts). Run `synclonectl --help`. Paths are written as they appear in the Synclone folder: `"<cloud drive>/<path>"`.
+
+```bash
+synclonectl daemon
+```
+
+```bash
+synclonectl drive add drive --name "Google Drive"
+```
+
+```bash
+synclonectl download "Google Drive/Audiobooks"
+```
+
+```bash
+synclonectl trash list
+```
+
+On Linux the folders are plain directories, and files not yet downloaded appear as empty `*.sclstub` files. This test-only layout is replaced by native placeholders on Windows (Phase 4) and macOS (Phase 6).
+
+Synclone uses your existing rclone config file, so remotes you already have appear as cloud drives automatically.
 
 ## Credits
 
