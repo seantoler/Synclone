@@ -126,6 +126,7 @@ impl Env {
         }
     }
 
+    #[cfg(unix)]
     fn kill(&mut self) {
         if let Some(mut c) = self.daemon.take() {
             c.kill().unwrap();
@@ -148,7 +149,11 @@ impl Env {
             std::thread::sleep(Duration::from_millis(200));
         }
         panic!(
-            "timed out waiting for {what}; log:\n{}",
+            "timed out waiting for {what}\nops: {:?}\nactivity: {:?}\nlocal: {:?}\ndata: {:?}\nlog:\n{}",
+            self.try_ctl(&["ops"]),
+            self.try_ctl(&["activity", "--limit", "30"]),
+            list_dir(&self.root()),
+            list_dir(&self.data()),
             std::fs::read_to_string(self.path("daemon.log")).unwrap_or_default()
         );
     }
@@ -158,6 +163,22 @@ impl Drop for Env {
     fn drop(&mut self) {
         self.stop();
     }
+}
+
+fn list_dir(p: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut stack = vec![p.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            let path = e.path();
+            let len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            out.push(format!("{} ({len})", path.strip_prefix(p).unwrap_or(&path).display()));
+            if path.is_dir() {
+                stack.push(path);
+            }
+        }
+    }
+    out
 }
 
 fn rand_suffix() -> u64 {

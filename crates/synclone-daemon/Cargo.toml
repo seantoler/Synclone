@@ -13,7 +13,6 @@ path = "src/bin/synclone-daemon.rs"
 
 [dependencies]
 anyhow.workspace = true
-clap.workspace = true
 dirs.workspace = true
 serde.workspace = true
 serde_json.workspace = true

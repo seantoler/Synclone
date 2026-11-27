@@ -112,9 +112,22 @@ pub async fn call(addr: &str, method: &str, params: Value, on_event: &mut dyn Fn
     #[cfg(windows)]
     {
         use tokio::net::windows::named_pipe::ClientOptions;
-        let s = ClientOptions::new().open(addr).map_err(|e| {
-            anyhow::anyhow!("Synclone is not running (cannot reach {addr}: {e}). Start it with `synclonectl daemon`.")
-        })?;
+        // ERROR_PIPE_BUSY (231): every instance is taken for a moment; retry.
+        let mut tries = 0;
+        let s = loop {
+            match ClientOptions::new().open(addr) {
+                Ok(s) => break s,
+                Err(e) if e.raw_os_error() == Some(231) && tries < 50 => {
+                    tries += 1;
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+                Err(e) => {
+                    anyhow::bail!(
+                        "Synclone is not running (cannot reach {addr}: {e}). Start it with `synclonectl daemon`."
+                    )
+                }
+            }
+        };
         call_on(s, method, params, on_event).await
     }
 }
