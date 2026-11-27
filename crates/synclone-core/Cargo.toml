@@ -11,6 +11,7 @@ anyhow.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
 gethostname.workspace = true
+futures.workspace = true
 globset.workspace = true
 rusqlite.workspace = true
 serde.workspace = true

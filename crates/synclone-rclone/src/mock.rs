@@ -86,10 +86,8 @@ fn is_local(fs: &str) -> bool {
     let b = fs.as_bytes();
     fs.starts_with('/')
         || fs.starts_with("\\\\")
-        || (b.len() >= 2
-            && b[0].is_ascii_alphabetic()
-            && b[1] == b':'
-            && (b.len() == 2 || b[2] == b'\\' || b[2] == b'/'))
+        // "C:\\..." or "C:/..." is a local Windows path; "r:" is a remote.
+        || (b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/'))
 }
 
 fn parent_of(p: &str) -> &str {
@@ -893,6 +891,18 @@ impl RcloneApi for MockRclone {
             return Err(not_found("operations/purge", "directory not found"));
         }
         self.remove(fs, remote);
+        Ok(())
+    }
+
+    async fn movedir(&self, fs: &str, src: &str, dst: &str) -> Result<()> {
+        self.enter("sync/move")?;
+        let s = self.store(fs);
+        let prefix = format!("{}/", src.trim_matches('/'));
+        if !s.dirs.contains_key(src.trim_matches('/')) && !s.files.keys().any(|k| k.starts_with(&prefix)) {
+            return Err(not_found("sync/move", "directory not found"));
+        }
+        let mut g = self.inner.lock().unwrap();
+        Self::rename_locked(&mut g, fs, src, dst);
         Ok(())
     }
 }

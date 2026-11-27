@@ -21,6 +21,7 @@ pub const REMOTE_WRITE_CALLS: &[&str] = &[
     "operations/mkdir",
     "operations/rmdir",
     "operations/purge",
+    "sync/move",
 ];
 
 #[async_trait]
@@ -67,6 +68,20 @@ pub trait RcloneApi: Send + Sync {
     /// Remove a directory and everything in it (to the provider's trash
     /// where it has one; Synclone never sets hard-delete options).
     async fn purge(&self, fs: &str, remote: &str) -> Result<()>;
+    /// Move a whole folder inside one remote (server-side where the backend
+    /// can; `sync/move` with the folders named as roots with a trailing
+    /// slash, as OpenCfDrive does). The destination must not exist.
+    async fn movedir(&self, fs: &str, src: &str, dst: &str) -> Result<()>;
+}
+
+/// `remote:` + `path` as an fs root naming a folder (trailing slash).
+pub fn folder_root(fs: &str, path: &str) -> String {
+    let p = path.trim_matches('/');
+    if p.is_empty() {
+        fs.to_string()
+    } else {
+        format!("{fs}{p}/")
+    }
 }
 
 /// Split `"remote:path/inside"` into `("remote:", "path/inside")`.
@@ -75,10 +90,10 @@ pub fn split_remote(spec: &str) -> (String, String) {
     let s = spec.trim();
     // A Windows drive letter ("C:\...") is a local path, not a remote.
     let bytes = s.as_bytes();
-    let is_drive_letter = bytes.len() >= 2
+    let is_drive_letter = bytes.len() >= 3
         && bytes[0].is_ascii_alphabetic()
         && bytes[1] == b':'
-        && (bytes.len() == 2 || bytes[2] == b'\\' || bytes[2] == b'/');
+        && (bytes[2] == b'\\' || bytes[2] == b'/');
     if is_drive_letter || s.starts_with('/') || s.starts_with("\\\\") {
         return (s.to_string(), String::new());
     }
@@ -107,6 +122,7 @@ mod tests {
     fn splits_remote_specs() {
         assert_eq!(split_remote("gdrive:"), ("gdrive:".into(), "".into()));
         assert_eq!(split_remote("gdrive:a/b/"), ("gdrive:".into(), "a/b".into()));
+        assert_eq!(split_remote("r:"), ("r:".into(), "".into()));
         assert_eq!(split_remote("/tmp/x"), ("/tmp/x".into(), "".into()));
         assert_eq!(split_remote("C:\\Users\\me"), ("C:\\Users\\me".into(), "".into()));
         assert_eq!(join_remote("", "a"), "a");

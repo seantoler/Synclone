@@ -295,4 +295,14 @@ impl RcloneApi for RcClient {
             .await
             .map(|_| ())
     }
+
+    async fn movedir(&self, fs: &str, src: &str, dst: &str) -> Result<()> {
+        let p = json!({
+            "srcFs": crate::api::folder_root(fs, src),
+            "dstFs": crate::api::folder_root(fs, dst),
+            "createEmptySrcDirs": true,
+            "deleteEmptySrcDirs": true,
+        });
+        self.call_async("sync/move", p).await.map(|_| ())
+    }
 }
