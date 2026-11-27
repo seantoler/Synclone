@@ -192,6 +192,13 @@ impl RcloneDaemon {
             )
         })?;
         let pid = child.id().unwrap_or(0);
+        #[cfg(windows)]
+        if let Some(h) = child.raw_handle() {
+            // Die with the daemon even if it is killed (D-004).
+            if let Err(e) = kill_on_close_job::assign(h) {
+                tracing::warn!("could not tie rclone to Synclone's lifetime: {e}");
+            }
+        }
         let deadline = tokio::time::Instant::now() + READY_TIMEOUT;
         loop {
             if let Ok(Some(status)) = child.try_wait() {
@@ -345,5 +352,49 @@ impl Drop for RcloneDaemon {
     fn drop(&mut self) {
         // kill_on_drop on the child handles the process itself.
         self.stop_tx.send_replace(true);
+    }
+}
+
+/// Windows: a job object, created once per process, that kills every
+/// process in it when its last handle closes, i.e. when this process exits
+/// for any reason (the Windows counterpart of `PR_SET_PDEATHSIG`, D-004).
+#[cfg(windows)]
+mod kill_on_close_job {
+    use std::sync::OnceLock;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+
+    struct Job(HANDLE);
+    // A job handle may be used from any thread.
+    unsafe impl Send for Job {}
+    unsafe impl Sync for Job {}
+
+    static JOB: OnceLock<Result<Job, String>> = OnceLock::new();
+
+    fn job() -> Result<&'static Job, String> {
+        JOB.get_or_init(|| unsafe {
+            let h = CreateJobObjectW(None, None).map_err(|e| e.to_string())?;
+            let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            SetInformationJobObject(
+                h,
+                JobObjectExtendedLimitInformation,
+                &info as *const _ as *const core::ffi::c_void,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+            .map_err(|e| e.to_string())?;
+            // The handle is deliberately never closed: closing it is what kills rclone.
+            Ok(Job(h))
+        })
+        .as_ref()
+        .map_err(|e| e.clone())
+    }
+
+    pub fn assign(process: std::os::windows::io::RawHandle) -> Result<(), String> {
+        let j = job()?;
+        unsafe { AssignProcessToJobObject(j.0, HANDLE(process)) }.map_err(|e| e.to_string())
     }
 }

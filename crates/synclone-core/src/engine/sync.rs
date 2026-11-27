@@ -191,6 +191,12 @@ impl Engine {
                 self.db
                     .enqueue_op("hydrate", drive, &path, &serde_json::json!({}), self.now())?;
             }
+            E::Hydrated {
+                drive,
+                path,
+                size,
+                mtime_ns,
+            } => self.on_hydrated(drive, &path, LocalFingerprint { size, mtime_ns })?,
             E::PinRequested { drive, path, recursive } => {
                 self.db.enqueue_op(
                     "pin",
@@ -237,6 +243,40 @@ impl Engine {
                 self.rename_drive(drive, &new_name)?;
             }
         }
+        Ok(())
+    }
+
+    /// The OS hydrated a placeholder on its own (D-021). If the file on disk
+    /// is still exactly what the placeholder described, and that is the
+    /// cloud version on record, it is now a downloaded copy of that version.
+    /// Anything else is left to a normal reconcile, which re-derives it.
+    fn on_hydrated(&self, drive: DriveId, p: &RelPath, served: LocalFingerprint) -> Result<()> {
+        let d = self.drive(drive)?;
+        let local = self.provider.local_status(&d, p)?;
+        let item = self.db.item(drive, p)?;
+        let matches = match (&item, local) {
+            (Some(it), LocalStatus::File(fp)) => {
+                fp == served
+                    && it.local_state == LocalState::Placeholder
+                    && it.remote.as_ref().map(|r| r.size == fp.size).unwrap_or(false)
+            }
+            _ => false,
+        };
+        if !matches {
+            return self.enqueue_reconcile(drive, p, 0);
+        }
+        let mut it = item.expect("checked above");
+        it.synced = it.remote.clone();
+        it.local_base = Some(served);
+        it.local_state = LocalState::Downloaded;
+        it.dirty = false;
+        self.db.upsert_item(&it)?;
+        // Downloads stay: keep it from being freed automatically.
+        self.provider.set_state(&d, p, LocalState::Downloaded)?;
+        // A "hydrate" op queued for the same open is now done.
+        self.db.cancel_ops(drive, "hydrate", p)?;
+        self.db
+            .log_activity(Some(drive), Some(p), "download", &format!("Downloaded {p}"), false);
         Ok(())
     }
 
@@ -322,6 +362,12 @@ impl Engine {
             .iter()
             .any(|a| !a.is_root() && self.ignore.is_ignored(a.name()))
         {
+            return Ok(Outcome::Done);
+        }
+        // The drive's whole folder is gone: that is a disconnect, never a
+        // pile of deletes (the OS may report each child before the folder).
+        if self.provider.local_status(d, &RelPath::root())? == LocalStatus::Absent {
+            self.drive_root_removed(d.id)?;
             return Ok(Outcome::Done);
         }
         let item = self.db.item(d.id, p)?;
