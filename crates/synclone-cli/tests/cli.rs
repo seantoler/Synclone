@@ -210,12 +210,10 @@ fn list_dir(p: &Path) -> Vec<String> {
     out
 }
 
+/// Unique per test within this process (tests run in parallel).
 fn rand_suffix() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .subsec_nanos() as u64
-        % 1000
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 fn write(p: &Path, data: &[u8]) {
