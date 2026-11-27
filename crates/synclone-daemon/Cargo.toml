@@ -7,6 +7,10 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
+[[bin]]
+name = "synclone-daemon"
+path = "src/bin/synclone-daemon.rs"
+
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true

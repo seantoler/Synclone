@@ -354,7 +354,7 @@ impl Db {
     pub fn item_by_remote_id_on(c: &rusqlite::Connection, drive: DriveId, id: &str) -> rusqlite::Result<Option<Item>> {
         use rusqlite::OptionalExtension;
         let mut st = c.prepare_cached(
-            "SELECT drive_id, path, is_dir, remote_id, remote_size, remote_mtime, remote_hash, local_state, pinned, synced_size, synced_mtime, synced_hash, local_size, local_mtime, dirty, unsyncable FROM items WHERE drive_id = ?1 AND remote_id = ?2 AND remote_size IS NOT NULL LIMIT 1",
+            "SELECT drive_id, path, is_dir, remote_id, remote_size, remote_mtime, remote_hash, local_state, pinned, synced_size, synced_mtime, synced_hash, local_size, local_mtime, dirty, unsyncable FROM items INDEXED BY items_remote_id WHERE drive_id = ?1 AND remote_id = ?2 AND remote_size IS NOT NULL LIMIT 1",
         )?;
         st.query_row(rusqlite::params![drive, id], crate::db::item_row)
             .optional()

@@ -55,7 +55,7 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (drive_id, path)
     ) WITHOUT ROWID;
     CREATE INDEX items_parent ON items(drive_id, parent_path);
-    CREATE INDEX items_remote_id ON items(drive_id, remote_id) WHERE remote_id IS NOT NULL;
+    CREATE INDEX items_remote_id ON items(drive_id, remote_id);
     CREATE TABLE trash (
         id INTEGER PRIMARY KEY,
         drive_id INTEGER NOT NULL REFERENCES drives(id) ON DELETE CASCADE,
@@ -606,7 +606,7 @@ impl Db {
     pub fn item_by_remote_id(&self, drive: DriveId, id: &str) -> DbResult<Option<Item>> {
         self.lock()
             .query_row(
-                &format!("SELECT {ITEM_COLS} FROM items WHERE drive_id = ?1 AND remote_id = ?2 LIMIT 1"),
+                &format!("SELECT {ITEM_COLS} FROM items INDEXED BY items_remote_id WHERE drive_id = ?1 AND remote_id = ?2 LIMIT 1"),
                 params![drive, id],
                 item_from_row,
             )

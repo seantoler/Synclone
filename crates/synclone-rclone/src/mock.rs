@@ -693,45 +693,58 @@ impl RcloneApi for MockRclone {
         }
         self.store_for(fs)?;
         let g = self.inner.lock().unwrap();
-        let s = g.stores.get(fs).cloned().unwrap_or_default();
-        drop(g);
+        let empty = MockStore::default();
+        let s = g.stores.get(fs).unwrap_or(&empty);
         let base = remote.trim_matches('/');
-        if !base.is_empty() && !s.dirs.contains_key(base) && !s.files.keys().any(|k| k.starts_with(&format!("{base}/")))
-        {
-            return Err(not_found("operations/list", "directory not found"));
-        }
         let prefix = if base.is_empty() {
             String::new()
         } else {
             format!("{base}/")
         };
-        let mut out = Vec::new();
-        let direct = |p: &str| -> bool {
-            p.starts_with(&prefix) && p.len() > prefix.len() && (opts.recurse || !p[prefix.len()..].contains('/'))
-        };
-        // Directories: explicit ones, plus implicit parents of files.
-        let mut dirs: BTreeMap<String, Option<String>> =
-            s.dirs.iter().map(|(k, v)| (k.clone(), Some(v.clone()))).collect();
-        for k in s.files.keys() {
-            let mut d = parent_of(k).to_string();
-            while !d.is_empty() {
-                dirs.entry(d.clone()).or_insert(None);
-                d = parent_of(&d).to_string();
-            }
+        // Range queries over the sorted maps: listing one folder costs its
+        // size, not the whole store (the 100k-item index test relies on it).
+        // Parents are always explicit (put/mkdir/rename create them).
+        fn under<V>(m: &BTreeMap<String, V>, prefix: &str) -> bool {
+            m.range(prefix.to_string()..)
+                .next()
+                .map(|(k, _)| k.starts_with(prefix))
+                .unwrap_or(false)
         }
+        if !base.is_empty() && !s.dirs.contains_key(base) && !under(&s.files, &prefix) && !under(&s.dirs, &prefix) {
+            return Err(not_found("operations/list", "directory not found"));
+        }
+        let direct = |p: &str| -> bool { p.len() > prefix.len() && (opts.recurse || !p[prefix.len()..].contains('/')) };
+        let mut dir_entries = Vec::new();
+        let mut file_entries = Vec::new();
         if !opts.files_only {
-            for (d, id) in &dirs {
+            for (d, id) in s
+                .dirs
+                .range(prefix.clone()..)
+                .take_while(|(k, _)| k.starts_with(&prefix))
+            {
                 if direct(d) {
-                    out.push(self.entry_for(d, None, id.as_deref(), opts));
+                    dir_entries.push((d.clone(), id.clone()));
                 }
             }
         }
         if !opts.dirs_only {
-            for (k, o) in &s.files {
+            for (k, o) in s
+                .files
+                .range(prefix.clone()..)
+                .take_while(|(k, _)| k.starts_with(&prefix))
+            {
                 if direct(k) {
-                    out.push(self.entry_for(k, Some(o), None, opts));
+                    file_entries.push((k.clone(), o.clone()));
                 }
             }
+        }
+        drop(g);
+        let mut out = Vec::with_capacity(dir_entries.len() + file_entries.len());
+        for (d, id) in dir_entries {
+            out.push(self.entry_for(&d, None, Some(&id), opts));
+        }
+        for (k, o) in file_entries {
+            out.push(self.entry_for(&k, Some(&o), None, opts));
         }
         Ok(out)
     }
@@ -760,7 +773,13 @@ impl RcloneApi for MockRclone {
             drop(g);
             return Ok(Some(self.entry_for(p, Some(&o), None, opts)));
         }
-        let implicit = s.files.keys().any(|k| k.starts_with(&format!("{p}/")));
+        let pre = format!("{p}/");
+        let implicit = s
+            .files
+            .range(pre.clone()..)
+            .next()
+            .map(|(k, _)| k.starts_with(&pre))
+            .unwrap_or(false);
         if let Some(id) = s.dirs.get(p).cloned() {
             drop(g);
             return Ok(Some(self.entry_for(p, None, Some(&id), opts)));
