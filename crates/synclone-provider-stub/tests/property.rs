@@ -73,6 +73,8 @@ struct World {
     seen_remote: BTreeMap<String, Vec<u8>>,
     /// Content the user deleted locally at a path (a later write there replaces it).
     deleted_at: BTreeMap<String, Vec<u8>>,
+    /// Every content written, by md5 (the mock's hash type).
+    by_hash: std::collections::HashMap<String, Vec<u8>>,
 }
 
 impl World {
@@ -103,12 +105,17 @@ impl World {
             must_exist: HashSet::new(),
             seen_remote: BTreeMap::new(),
             deleted_at: BTreeMap::new(),
+            by_hash: Default::default(),
         }
     }
 
     fn content(&mut self) -> Vec<u8> {
+        use md5::{Digest, Md5};
         self.next += 1;
-        format!("content-{}", self.next).into_bytes()
+        let c = format!("content-{}", self.next).into_bytes();
+        let h: String = Md5::digest(&c).iter().map(|b| format!("{b:02x}")).collect();
+        self.by_hash.insert(h, c.clone());
+        c
     }
 
     fn local_path(&self, p: &str) -> std::path::PathBuf {
@@ -134,8 +141,16 @@ impl World {
             .collect();
     }
 
-    /// The content a placeholder at `p` stands for, if the cloud still has it.
+    /// The content a placeholder at `p` stands for, if the cloud still has
+    /// it: the version the engine last recorded there (by hash), else the
+    /// one the model last saw there.
     fn placeholder_content(&self, p: &str) -> Option<Vec<u8>> {
+        if let Some(it) = self.eng.db.item(self.d.id, &rp(p)).unwrap() {
+            let h = it.remote.as_ref().or(it.synced.as_ref()).and_then(|m| m.hash.clone());
+            if let Some(c) = h.and_then(|h| self.by_hash.get(&h).cloned()) {
+                return self.remote_contents().contains(&c).then_some(c);
+            }
+        }
         // Still in the cloud unchanged (possibly renamed there since).
         let seen = self.seen_remote.get(p)?;
         self.remote_contents().contains(seen).then(|| seen.clone())
@@ -307,7 +322,7 @@ impl World {
                     path: rp(PATHS[*i]),
                 });
                 self.eng.run_until_idle(true, 20).await.unwrap();
-                self.snapshot_remote();
+                // No snapshot: opening a file does not poll the cloud.
             }
             Act::Free(i) => {
                 let _ = self.eng.free(id, &rp(PATHS[*i]), true);

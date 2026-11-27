@@ -140,3 +140,7 @@ The rclone login never leaves the daemon. Every path is overridable by environme
 
 - **OneDrive for Business / SharePoint:** rclone documents that these may modify Office files on upload. Drives whose `drive_type` is `business` or `documentLibrary` therefore compare by size and time only (`hash_type = None`, set in `probe_drive`). Not yet confirmed against a live tenant; the live smoke test (HUMAN_TODO) covers it.
 - **Google Docs:** not built on yet. The planned approach is Drive's `export_formats` link types (`url` on Windows, `webloc` on macOS) so Docs appear as read-only link files. rclone reports their size as -1, which the engine already treats as "unknown size". Confirming this needs a live Drive account (layer 4), so it stays open and nothing depends on it in Phases 0–3.
+
+## D-020 Property-test model: what a placeholder stands for
+
+The no-loss invariant exempts content the user overwrote on their own side. Writing over a placeholder overwrites the file that placeholder stands for. The model identifies that file by the version the engine last recorded at the path (matched by content hash), not by the model's own last view of the cloud. The difference showed up in a Windows CI seed (now kept in `property.proptest-regressions`), where the engine had uploaded and then freed a file without a poll in between. Neither this nor the earlier model fixes changed what counts as loss of data the user didn't overwrite.

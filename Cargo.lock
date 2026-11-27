@@ -1479,6 +1479,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "md-5",
  "proptest",
  "serde_json",
  "synclone-core",
