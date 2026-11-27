@@ -68,6 +68,9 @@ impl Env {
             .env("SYNCLONE_RCLONE", rclone())
             .env("SYNCLONE_DEBOUNCE_MS", "200")
             .env("SYNCLONE_SCAN_SECS", "1")
+            // These tests check the stub provider's plain folders; the
+            // Windows provider has its own suite (layer 3).
+            .env("SYNCLONE_PROVIDER", "stub")
             .env("SYNCLONE_NO_BROWSER", "1");
         for (k, v) in &self.extra_env {
             c.env(k, v);
@@ -155,7 +158,7 @@ impl Env {
         }
     }
 
-    #[cfg(unix)]
+    /// SIGKILL on Unix, TerminateProcess on Windows: no chance to clean up.
     fn kill(&mut self) {
         if let Some(mut c) = self.daemon.take() {
             c.kill().unwrap();
@@ -465,6 +468,76 @@ fn kill_and_restart_resumes_in_flight_operations() {
         e.ctl(&["ops"]).as_array().map(|a| a.is_empty()).unwrap_or(false)
     });
     let _ = ops;
+}
+
+/// The Windows counterpart: the daemon is killed outright (TerminateProcess)
+/// mid-upload; the job object takes rclone with it (D-004); after a
+/// restart every journaled upload completes.
+#[cfg(windows)]
+#[test]
+fn kill_and_restart_resumes_in_flight_operations_windows() {
+    let mut e = Env::new();
+    e.extra_env
+        .push(("SYNCLONE_RCLONE_ARGS".into(), "--bwlimit 512k".into()));
+    e.start();
+    e.add_local_drive("Cloud");
+    e.ctl(&["sync"]);
+    let local = e.root().join("Cloud");
+    let mut files = Vec::new();
+    for i in 0..3 {
+        let data: Vec<u8> = (0..2_000_000u32)
+            .map(|x| (x.wrapping_mul(31).wrapping_add(i)) as u8)
+            .collect();
+        write(&local.join(format!("big{i}.bin")), &data);
+        files.push(data);
+    }
+    e.wait_for("an upload in flight", || {
+        e.try_ctl(&["ops"])
+            .map(|v| {
+                v.as_array()
+                    .map(|a| a.iter().any(|o| o["state"] == "running"))
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false)
+    });
+    // "Running { pid: 1234, version: ... }"
+    let st = e.ctl(&["status"]);
+    let rc = st["rclone"].as_str().unwrap_or_default().to_string();
+    let pid: u32 = rc
+        .split("pid: ")
+        .nth(1)
+        .and_then(|r| r.split(|c: char| !c.is_ascii_digit()).next())
+        .and_then(|n| n.parse().ok())
+        .unwrap_or_else(|| panic!("no rclone pid in {rc:?}"));
+    assert!(windows_process_alive(pid), "rclone {pid} is running");
+    let complete_before = (0..3)
+        .filter(|i| std::fs::read(e.data().join(format!("big{i}.bin"))).ok().as_ref() == Some(&files[*i]))
+        .count();
+    assert!(complete_before < 3, "the kill must land before all uploads finished");
+    e.kill();
+    let t = Instant::now();
+    while windows_process_alive(pid) && t.elapsed() < Duration::from_secs(10) {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(!windows_process_alive(pid), "rclone {pid} was left running");
+
+    e.extra_env.clear();
+    e.start();
+    e.wait_for("all uploads after restart", || {
+        (0..3).all(|i| std::fs::read(e.data().join(format!("big{i}.bin"))).ok().as_ref() == Some(&files[i]))
+    });
+    e.wait_for("journal drained", || {
+        e.ctl(&["ops"]).as_array().map(|a| a.is_empty()).unwrap_or(false)
+    });
+}
+
+#[cfg(windows)]
+fn windows_process_alive(pid: u32) -> bool {
+    let out = Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).contains(&format!("\"{pid}\""))
 }
 
 #[cfg(unix)]

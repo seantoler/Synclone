@@ -36,8 +36,14 @@ pub struct Config {
     pub rclone: Option<PathBuf>,
     /// `SYNCLONE_RCLONE_ARGS`: extra rclone flags (space separated), e.g. `--bwlimit 1M`.
     pub rclone_args: Vec<String>,
-    /// `SYNCLONE_SCAN_SECS`: local scan interval for the stub provider.
+    /// `SYNCLONE_SCAN_SECS`: how often to compare the drive folders with
+    /// the DB. The stub has no watcher and relies on it (default 5 s); the
+    /// Windows provider gets OS events and scans only as a safety net (60 s).
     pub scan_interval: Duration,
+    /// `SYNCLONE_PROVIDER`: `native` (Windows Cloud Files; the default on
+    /// Windows) or `stub` (plain folders; the default elsewhere until the
+    /// macOS provider exists, and what the CLI tests use).
+    pub provider: ProviderKind,
     pub settings: EngineSettings,
 }
 
@@ -52,6 +58,12 @@ impl Config {
             .ok()
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| default_socket(&state_dir));
+        let provider = match std::env::var("SYNCLONE_PROVIDER").as_deref() {
+            Ok("stub") => ProviderKind::Stub,
+            Ok("native") => ProviderKind::Native,
+            _ if cfg!(windows) => ProviderKind::Native,
+            _ => ProviderKind::Stub,
+        };
         let mut settings = EngineSettings::default();
         if let Some(ms) = std::env::var("SYNCLONE_DEBOUNCE_MS").ok().and_then(|s| s.parse().ok()) {
             settings.debounce_ms = ms;
@@ -66,14 +78,21 @@ impl Config {
                 std::env::var("SYNCLONE_SCAN_SECS")
                     .ok()
                     .and_then(|s| s.parse().ok())
-                    .unwrap_or(5),
+                    .unwrap_or(if provider == ProviderKind::Native { 60 } else { 5 }),
             ),
+            provider,
             state_dir,
             sync_root,
             socket,
             settings,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderKind {
+    Stub,
+    Native,
 }
 
 pub fn default_socket(state_dir: &Path) -> String {
@@ -87,7 +106,6 @@ pub fn default_socket(state_dir: &Path) -> String {
 pub struct Daemon {
     pub engine: Arc<Engine>,
     pub rclone: Arc<RcloneDaemon>,
-    pub stub: Arc<StubProvider>,
     pub config: Config,
     wake: Notify,
     stop: tokio::sync::watch::Sender<bool>,
@@ -108,13 +126,39 @@ impl Daemon {
         rc.extra_args = config.rclone_args.clone();
         let rclone = RcloneDaemon::start(rc).await.context("starting rclone")?;
         let db = Arc::new(Db::open(&config.state_dir.join("state.db")).context("opening the state database")?);
-        // Phases 4 and 6 replace this with the Windows / macOS providers.
-        let stub = Arc::new(StubProvider::new(&config.sync_root, config.state_dir.join("recycle")));
+        let provider: Arc<dyn Provider> = match config.provider {
+            ProviderKind::Stub => Arc::new(StubProvider::new(&config.sync_root, config.state_dir.join("recycle"))),
+            #[cfg(windows)]
+            ProviderKind::Native => Arc::new(
+                synclone_provider_windows::WindowsProvider::start(
+                    {
+                        let mut c = synclone_provider_windows::WindowsProviderConfig::new(&config.sync_root);
+                        // `SYNCLONE_SYNC_ROOT_ACCOUNT`: tests register their own sync
+                        // root and never touch the user's ("default").
+                        if let Ok(a) = std::env::var("SYNCLONE_SYNC_ROOT_ACCOUNT") {
+                            if !a.is_empty() {
+                                c.display_name = format!("{APP_NAME} ({a})");
+                                c.account = a;
+                            }
+                        }
+                        c
+                    },
+                    db.clone(),
+                    rclone.endpoint().clone(),
+                )
+                .context("connecting the Synclone folder to Windows")?,
+            ),
+            // macOS arrives in Phase 6.
+            #[cfg(not(windows))]
+            ProviderKind::Native => {
+                bail!("there is no native file provider for this OS yet; set SYNCLONE_PROVIDER=stub")
+            }
+        };
         let api: Arc<dyn RcloneApi> = rclone.client();
         let engine = Engine::new(
             db,
             api,
-            stub.clone() as Arc<dyn Provider>,
+            provider,
             Arc::new(SystemClock),
             config.settings.clone(),
             config.state_dir.clone(),
@@ -127,7 +171,6 @@ impl Daemon {
         Ok(Arc::new(Self {
             engine,
             rclone,
-            stub,
             config,
             wake: Notify::new(),
             stop,
@@ -218,7 +261,8 @@ impl Daemon {
         }
     }
 
-    /// The stub provider has no file watcher: scan for local changes.
+    /// Compare the drive folders with the DB: the stub's only change
+    /// detection, and a safety net for missed OS events otherwise.
     async fn scan_loop(&self) {
         loop {
             tokio::time::sleep(self.config.scan_interval).await;
@@ -325,6 +369,11 @@ impl Daemon {
         }
     }
 
+    /// A drive's folder on disk.
+    pub fn folder(&self, d: &Drive) -> PathBuf {
+        self.engine.provider.content_path(d, &RelPath::root())
+    }
+
     fn drive_arg(&self, p: &Value) -> Result<Drive> {
         if let Some(id) = p.get("drive_id").and_then(Value::as_i64) {
             return self.engine.drive(id);
@@ -390,7 +439,7 @@ impl Daemon {
                         "state": d.state,
                         "paused": d.paused,
                         "imported": d.imported,
-                        "folder": self.stub.drive_dir(&d),
+                        "folder": self.folder(&d),
                     }));
                 }
                 Value::Array(out)
@@ -422,7 +471,7 @@ impl Daemon {
                 };
                 let r = e.add_drive(kind, name, params, &mut ask, &mut on_event).await;
                 match r {
-                    Ok(d) => json!({"id": d.id, "name": d.display_name, "folder": self.stub.drive_dir(&d)}),
+                    Ok(d) => json!({"id": d.id, "name": d.display_name, "folder": self.folder(&d)}),
                     Err(err) if !unanswered.is_empty() => {
                         bail!("{err:#}. Provide these settings with --param name=value: {}", unanswered.join(", "))
                     }
@@ -432,7 +481,7 @@ impl Daemon {
             "drive.connect" => {
                 let remote = p.get("remote").and_then(Value::as_str).ok_or_else(|| anyhow!("which remote?"))?;
                 let d = e.connect_remote(remote, p.get("name").and_then(Value::as_str)).await?;
-                json!({"id": d.id, "name": d.display_name, "folder": self.stub.drive_dir(&d)})
+                json!({"id": d.id, "name": d.display_name, "folder": self.folder(&d)})
             }
             "drive.import" => {
                 let added = e.import_remotes().await?;
@@ -452,10 +501,10 @@ impl Daemon {
             "drive.rename" => {
                 let d = self.drive_arg(&p)?;
                 let new = p.get("new_name").and_then(Value::as_str).ok_or_else(|| anyhow!("new name?"))?;
-                let old_dir = self.stub.drive_dir(&d);
+                let old_dir = self.folder(&d);
                 let nd = e.rename_drive(d.id, new)?;
                 if old_dir.exists() {
-                    std::fs::rename(&old_dir, self.stub.drive_dir(&nd))?;
+                    std::fs::rename(&old_dir, self.folder(&nd))?;
                 }
                 json!({"name": nd.display_name})
             }
@@ -497,7 +546,7 @@ impl Daemon {
                 let path = Self::path_arg(&p)?;
                 e.handle_event(ProviderEvent::HydrationRequested { drive: d.id, path: path.clone() })?;
                 e.run_until_idle(false, 50).await?;
-                json!({"path": self.stub.path_of(&d, &path)})
+                json!({"path": self.engine.provider.content_path(&d, &path)})
             }
             "download" => {
                 let d = self.drive_arg(&p)?;
@@ -507,7 +556,7 @@ impl Daemon {
                 if p.get("wait").and_then(Value::as_bool).unwrap_or(true) {
                     e.run_until_idle(false, 10_000).await?;
                 }
-                json!({"path": self.stub.path_of(&d, &path)})
+                json!({"path": self.engine.provider.content_path(&d, &path)})
             }
             "free" => {
                 let d = self.drive_arg(&p)?;

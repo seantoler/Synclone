@@ -36,7 +36,6 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"
-thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -47,6 +46,7 @@ synclone-core = { path = "crates/synclone-core" }
 synclone-rclone = { path = "crates/synclone-rclone" }
 synclone-daemon = { path = "crates/synclone-daemon" }
 synclone-provider-stub = { path = "crates/synclone-provider-stub" }
+synclone-provider-windows = { path = "crates/synclone-provider-windows" }
 
 [profile.dev.package."*"]
 opt-level = 2
