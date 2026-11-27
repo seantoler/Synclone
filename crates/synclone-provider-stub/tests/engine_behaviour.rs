@@ -647,3 +647,25 @@ async fn rename_reported_together_with_a_change_at_the_old_name_is_not_a_delete(
     assert_eq!(h.remote("a/uno.txt").unwrap(), b"one");
     assert!(h.remote("a/one.txt").is_none());
 }
+
+/// Renaming a drive updates its name and its folder one after the other. A
+/// scan in between sees no folder under one of the names; that must not
+/// disconnect the drive (D-027).
+#[tokio::test]
+async fn a_scan_during_a_drive_rename_does_not_disconnect_it() {
+    let h = harness().await;
+    h.put("a.txt", b"a");
+    h.sync().await;
+    let old_dir = h.stub.drive_dir(&h.d);
+    let renamed = h.eng.rename_drive(h.d.id, "Renamed").unwrap();
+    // The scan lands before the folder is renamed.
+    h.eng.scan_drive(h.d.id).unwrap();
+    std::fs::rename(&old_dir, h.stub.drive_dir(&renamed)).unwrap();
+    h.clock.advance(10_000);
+    h.eng.run_until_idle(true, 20).await.unwrap();
+    let d = h.eng.drive(h.d.id).unwrap();
+    assert_eq!(d.state, DriveState::Connected);
+    assert_eq!(d.display_name, "Renamed");
+    assert!(h.stub.drive_dir(&d).join("a.txt.sclstub").exists());
+    assert!(h.eng.trash_list().unwrap().is_empty());
+}

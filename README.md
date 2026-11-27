@@ -4,7 +4,9 @@ Multi-cloud sync client with native placeholder files for Windows and macOS, bui
 
 Synclone puts one folder on your computer with a subfolder for each cloud storage you connect (Google Drive, OneDrive, Drime, and anything else rclone supports). Every file shows up without using disk space; open one and it downloads. Downloads stay until you remove them from the device. Changes you make upload automatically, and deleting a file locally never deletes it from the cloud until you empty Synclone's trash.
 
-> **Status:** early development. The sync engine and command-line tool are being built and tested on Linux first; the Windows and macOS integrations come next. See [`PLAN.md`](PLAN.md) for the full design and [`PROGRESS.md`](PROGRESS.md) for where things stand.
+> **Status:** early development, not yet released. The sync engine, the command-line tool, the Windows integration (Explorer placeholders through the Cloud Files API) and the Windows tray app are built and tested; macOS comes next. See [`PLAN.md`](PLAN.md) for the full design and [`PROGRESS.md`](PROGRESS.md) for where things stand.
+
+![Explorer showing Synclone's status icons](docs/evidence/windows-explorer-status.png)
 
 ## Building from source
 
@@ -44,7 +46,17 @@ synclonectl download "Google Drive/Audiobooks"
 synclonectl trash list
 ```
 
-On Linux the folders are plain directories, and files not yet downloaded appear as empty `*.sclstub` files. This test-only layout is replaced by native placeholders on Windows (Phase 4) and macOS (Phase 6).
+On Windows the Synclone folder (`%USERPROFILE%\Synclone`) is a native cloud folder in Explorer's navigation pane: cloud-only files show a cloud icon, "Always keep on this device" and "Free up space" work on files and folders, and opening a file downloads it with Explorer's own progress. On Linux the folders are plain directories, and files not yet downloaded appear as empty `*.sclstub` files (a test-only layout); macOS gets native placeholders in Phase 6.
+
+## The app (Windows)
+
+`Synclone.exe` (crate `synclone-app`) is the tray app: the menu from PLAN.md §6.1, the "Add cloud storage" wizard, and the Trash, Conflicts, Recent activity and Settings windows. It starts the background service itself (`Synclone --service`) and stops it on Quit.
+
+```bash
+cargo build -p synclone-app
+```
+
+The WebDriver tests for its windows need `tauri-driver` and `msedgedriver`; `scripts/webdriver-setup.ps1` puts both in `target/tools`, then run them with `SYNCLONE_WEBDRIVER=1 cargo test -p synclone-app --test webdriver`.
 
 Synclone uses your existing rclone config file, so remotes you already have appear as cloud drives automatically.
 

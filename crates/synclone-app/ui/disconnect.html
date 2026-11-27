@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Disconnect</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+  <h1 id="title">Disconnect</h1>
+  <p id="text" class="lead"></p>
+  <div id="pending" class="confirm hidden">
+    <p>Some files have changes that are not uploaded yet:</p>
+    <pre id="pending-list" class="muted"></pre>
+    <p>Wait for them to upload, or keep them in a "Recovered" folder on this computer and disconnect now.</p>
+  </div>
+  <div id="error" class="error hidden"></div>
+  <div class="actions">
+    <button id="cancel" class="left">Cancel</button>
+    <button id="recover" class="hidden">Keep them and disconnect</button>
+    <button id="go" class="danger">Disconnect</button>
+  </div>
+  <div class="note rclone-terms" id="details"></div>
+</main>
+<script src="common.js"></script>
+<script>
+const id = Number(query('id'));
+let drive = null;
+async function load() {
+  const drives = await rpc('drive.list');
+  drive = drives.find((d) => d.id === id);
+  if (!drive) {
+    $('text').textContent = 'This cloud drive is not connected.';
+    $('go').disabled = true;
+    return;
+  }
+  $('title').textContent = `Disconnect ${drive.name}?`;
+  $('text').textContent =
+    `This removes the ${drive.name} folder from this computer. Nothing is deleted from ${drive.service}. ` +
+    'You can connect it again later.';
+  // Shown in the details note, where rclone terms are allowed (PLAN.md §6.4).
+  $('details').textContent = `Details: rclone remote "${drive.remote}" (${drive.type}) stays in your rclone configuration.`; /* rclone-terms */
+}
+async function disconnect(recover) {
+  show('error', false);
+  try {
+    const r = await rpc('drive.remove', { drive_id: id, recover });
+    $('text').textContent = r.recovered
+      ? `${drive.name} is disconnected. Files with unsaved changes are in ${r.recovered}.`
+      : `${drive.name} is disconnected.`;
+    for (const b of ['go', 'recover']) show(b, false);
+    show('pending', false);
+    $('cancel').textContent = 'Close';
+  } catch (e) {
+    const msg = errorText(e);
+    const m = msg.match(/not uploaded yet: (.*?)\. Wait/);
+    if (m && !recover) {
+      $('pending-list').textContent = m[1].split(', ').join('\n');
+      show('pending', true);
+      show('recover', true);
+    } else {
+      $('error').textContent = msg;
+      show('error', true);
+    }
+  }
+}
+$('go').onclick = () => disconnect(false);
+$('recover').onclick = () => disconnect(true);
+$('cancel').onclick = () => invoke('close_self');
+load().catch((e) => { $('error').textContent = errorText(e); show('error', true); });
+</script>
+</body>
+</html>

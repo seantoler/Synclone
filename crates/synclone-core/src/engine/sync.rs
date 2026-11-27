@@ -238,7 +238,7 @@ impl Engine {
                         .enqueue_op("list", drive, &path, &serde_json::json!({}), self.now())?;
                 }
             }
-            E::DriveRootRemoved { drive } => self.drive_root_removed(drive)?,
+            E::DriveRootRemoved { drive } => self.drive_folder_missing(drive)?,
             E::DriveRootRenamed { drive, new_name } => {
                 self.rename_drive(drive, &new_name)?;
             }
@@ -289,7 +289,7 @@ impl Engine {
         }
         if self.provider.local_status(&d, &RelPath::root())? == LocalStatus::Absent {
             // The whole folder is gone: that is a disconnect, never a mass delete.
-            self.drive_root_removed(drive_id)?;
+            self.drive_folder_missing(drive_id)?;
             return Ok(0);
         }
         let entries = self.provider.scan(&d)?;
@@ -367,8 +367,13 @@ impl Engine {
         // The drive's whole folder is gone: that is a disconnect, never a
         // pile of deletes (the OS may report each child before the folder).
         if self.provider.local_status(d, &RelPath::root())? == LocalStatus::Absent {
-            self.drive_root_removed(d.id)?;
-            return Ok(Outcome::Done);
+            self.drive_folder_missing(d.id)?;
+            // Wait for that check: either the drive is disconnected (and this
+            // op dropped) or the folder is back under its current name.
+            return Ok(Outcome::Defer {
+                ms: crate::engine::drives::ROOT_CHECK_DELAY_MS + 500,
+                why: "the drive's folder is missing".into(),
+            });
         }
         let item = self.db.item(d.id, p)?;
         if item.as_ref().map(|i| i.unsyncable.is_some()).unwrap_or(false) {

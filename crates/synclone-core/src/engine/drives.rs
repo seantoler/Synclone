@@ -30,6 +30,9 @@ pub fn service_name(kind: &str) -> &str {
     }
 }
 
+/// How long a missing drive folder must stay missing to count as removed.
+pub const ROOT_CHECK_DELAY_MS: i64 = 2_000;
+
 /// What a disconnect would leave behind.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PendingWork {
@@ -306,6 +309,22 @@ impl Engine {
             false,
         );
         Ok(recovered)
+    }
+
+    /// The drive's folder looks gone. Check again in a moment, by the
+    /// drive's name at that time, before treating it as a disconnect: a
+    /// rename of the folder (in Explorer, or from the app, which updates
+    /// the DB and the folder one after the other) looks the same for an
+    /// instant (D-027).
+    pub fn drive_folder_missing(&self, id: DriveId) -> Result<()> {
+        self.db.enqueue_op(
+            "rootcheck",
+            id,
+            &RelPath::root(),
+            &serde_json::json!({}),
+            self.now() + ROOT_CHECK_DELAY_MS,
+        )?;
+        Ok(())
     }
 
     /// The drive's folder was deleted by the user: disconnect, no remote

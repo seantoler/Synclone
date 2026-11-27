@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Trash</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+  <h1>Trash</h1>
+  <p class="lead">Files and folders you deleted here are still in the cloud. Restore them, or empty the trash to
+    delete them from the cloud too (to the service's own trash where it has one).</p>
+  <table>
+    <thead><tr><th><input type="checkbox" id="all" aria-label="Select all"></th><th>Name</th><th>Cloud drive</th><th>Deleted</th><th class="num">Size</th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+  <div id="empty" class="empty hidden">The trash is empty.</div>
+  <div id="confirm" class="confirm hidden">
+    <p id="confirm-text"></p>
+    <div class="actions">
+      <button id="confirm-no">Cancel</button>
+      <button id="confirm-yes" class="danger">Delete from the cloud</button>
+    </div>
+  </div>
+  <div id="error" class="error hidden"></div>
+  <div id="done" class="ok hidden"></div>
+  <div class="actions">
+    <button id="restore" class="left" disabled>Restore selected</button>
+    <button id="restore-all">Restore all</button>
+    <button id="empty-trash" class="danger">Empty trash and delete from cloud</button>
+  </div>
+</main>
+<script src="common.js"></script>
+<script>
+let items = [];
+function selected() {
+  return [...document.querySelectorAll('#rows input:checked')].map((c) => Number(c.dataset.id));
+}
+function update() {
+  $('restore').disabled = selected().length === 0;
+}
+async function load() {
+  show('error', false);
+  try {
+    items = await rpc('trash.list');
+  } catch (e) {
+    $('error').textContent = errorText(e);
+    show('error', true);
+    return;
+  }
+  $('rows').replaceChildren(
+    ...items.map((t) =>
+      el('tr', { 'data-path': t.path },
+        el('td', {}, el('input', { type: 'checkbox', 'data-id': t.id, onchange: update, 'aria-label': `Select ${t.path}` })),
+        el('td', { text: t.path + (t.is_dir ? '/' : '') }),
+        el('td', { text: t.drive || '' }),
+        el('td', { text: when(t.deleted_at) }),
+        el('td', { class: 'num', text: size(t.size) })
+      )
+    )
+  );
+  show('empty', items.length === 0);
+  $('restore-all').disabled = items.length === 0;
+  $('empty-trash').disabled = items.length === 0;
+  $('all').checked = false;
+  update();
+}
+async function act(fn, message) {
+  show('error', false);
+  show('done', false);
+  try {
+    await fn();
+    $('done').textContent = message;
+    show('done', true);
+  } catch (e) {
+    $('error').textContent = errorText(e);
+    show('error', true);
+  }
+  await load();
+}
+$('all').onchange = () => {
+  for (const c of document.querySelectorAll('#rows input')) c.checked = $('all').checked;
+  update();
+};
+$('restore').onclick = () =>
+  act(async () => { for (const id of selected()) await rpc('trash.restore', { id }); }, 'Restored.');
+$('restore-all').onclick = () => act(() => rpc('trash.restore', { all: true }), 'Restored everything.');
+$('empty-trash').onclick = () => {
+  const total = items.reduce((a, t) => a + (t.size || 0), 0);
+  $('confirm-text').textContent =
+    `Delete ${items.length} item${items.length === 1 ? '' : 's'} (${size(total) || '0 bytes'}) from the cloud? ` +
+    'Where the service has its own trash they go there; otherwise they are gone for good.';
+  show('confirm', true);
+};
+$('confirm-no').onclick = () => show('confirm', false);
+$('confirm-yes').onclick = () => {
+  show('confirm', false);
+  act(() => rpc('trash.empty', { confirm: true }), 'The trash was emptied.');
+};
+load();
+setInterval(() => { if (!selected().length) load(); }, 5000);
+</script>
+</body>
+</html>

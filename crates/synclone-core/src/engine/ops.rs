@@ -197,6 +197,15 @@ impl Engine {
                 self.index_dir(&d, &op.path).await?;
                 Ok(Outcome::Done)
             }
+            "rootcheck" => {
+                // `d` is read now, so a renamed drive is checked by its new name.
+                if d.state == DriveState::Connected
+                    && self.provider.local_status(&d, &RelPath::root())? == LocalStatus::Absent
+                {
+                    self.drive_root_removed(d.id)?;
+                }
+                Ok(Outcome::Done)
+            }
             "empty_trash" => {
                 let id = op.payload.get("trash_id").and_then(|v| v.as_i64()).unwrap_or(-1);
                 self.empty_trash_entry(id).await?;

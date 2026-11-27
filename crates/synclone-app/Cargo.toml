@@ -1,10 +1,41 @@
 [package]
 name = "synclone-app"
-description = "Synclone tray / menu bar app (Phase 5)"
+description = "Synclone tray / menu bar app: a thin view over the daemon's RPC"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish = false
 
+# The executable is `Synclone`, distinct from `synclonectl` on
+# case-insensitive file systems (D-001).
+[[bin]]
+name = "Synclone"
+path = "src/main.rs"
+
 [dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+synclone-core.workspace = true
+synclone-daemon.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+# The GUI exists on Windows and macOS only; elsewhere the binary explains
+# that and points to synclonectl (Linux CI builds everything else).
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-autostart = "2"
+tauri-plugin-opener = "2"
+tauri-plugin-single-instance = "2"
+
+[target.'cfg(any(windows, target_os = "macos"))'.build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dev-dependencies]
+fantoccini = "0.22"
+serde_json.workspace = true
+synclone-rclone.workspace = true
+tempfile.workspace = true
