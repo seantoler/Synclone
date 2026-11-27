@@ -299,6 +299,9 @@ impl Provider for StubProvider {
         } else {
             bail!("{from} does not exist locally");
         };
+        if dst.exists() || self.path_of(drive, to).exists() || self.stub_of(drive, to).exists() {
+            bail!("{to} already exists locally; not overwriting it");
+        }
         if let Some(p) = dst.parent() {
             std::fs::create_dir_all(p)?;
         }

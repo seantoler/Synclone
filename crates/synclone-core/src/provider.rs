@@ -123,7 +123,8 @@ pub trait Provider: Send + Sync {
         meta: &ItemMeta,
         expected: LocalStatus,
     ) -> ProviderResult<LocalFingerprint>;
-    /// Rename a local item (conflict copies, remote renames).
+    /// Rename a local item (remote renames). Must fail rather than
+    /// overwrite anything at `to`.
     fn rename_local(&self, drive: &Drive, from: &RelPath, to: &RelPath) -> ProviderResult<()>;
     /// Copy a downloaded local file to a new local path (conflict copies).
     fn copy_local(&self, drive: &Drive, from: &RelPath, to: &RelPath) -> ProviderResult<()>;

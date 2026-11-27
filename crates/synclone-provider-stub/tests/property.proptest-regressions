@@ -1,0 +1,14 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc cb27df487d0e6f142c9e04bb329685e9c1bdd853a1e2db74aee0a81e83b6d4c5 # shrinks to acts = [LocalWrite(3), RemoteWrite(1), LocalRename(3, 1), RemoteWrite(3)]
+cc e35693c2bca68b54769ec9703e9ba6ee28e58b811aff1ae79a80f7dd4c5cb78d # shrinks to acts = [LocalWrite(3), Sync, LocalDelete(3), LocalWrite(3)]
+cc e154a8ee9285a1b0337398d7a90e54022351fab6ad32d38d8b3ce54577bc2fd2 # shrinks to acts = [LocalWrite(0), Open(0), RemoteRename(0, 2), RemoteDelete(0), LocalWrite(2)]
+cc 9e936b5d51d9223d490f1d20461ab8186349ee5217f7ed07c87857e6f1fcf3c6 # shrinks to acts = [LocalWrite(3), EmptyTrash, Free(3), LocalWrite(3)]
+cc 8e230745619d3c09621222c326ee5c101b54b395986a0a01ba45f66c2a3855e5 # shrinks to acts = [RemoteWrite(2), LocalWrite(0), Open(2), LocalDelete(2), LocalRename(0, 2)]
+cc c70ce95dba7a96a7aec1d0ff05e0845b034895051b288675b2307ed05511e653 # shrinks to acts = [LocalWrite(1), Open(0), LocalDelete(1), RestoreTrash, LocalWrite(1)]
+cc 7b200060a610062939607d8db9a4e75cbebdbfac21a45e64ba9ede22497a7819 # shrinks to acts = [LocalWrite(1), Sync, Free(1), RemoteRename(1, 0), LocalWrite(1), Free(0)]
+cc 291b86f65f4b38995e9c45de25cac8bdfbeb451e79c98951e6cc47c734769ee9 # shrinks to acts = [LocalWrite(0), Sync, Free(0), LocalRename(0, 1), LocalWrite(1)]

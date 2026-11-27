@@ -67,6 +67,19 @@ impl Engine {
         Ok(false)
     }
 
+    pub(crate) fn pending_move_involving(&self, d: DriveId, p: &RelPath) -> Result<bool> {
+        for op in self.db.ops_for(d)? {
+            if op.kind != "move" || op.state != "pending" {
+                continue;
+            }
+            let from = op.payload.get("from").and_then(|f| f.as_str()).and_then(RelPath::new);
+            if p.starts_with(&op.path) || from.map(|f| p.starts_with(&f)).unwrap_or(false) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Ask for a reconcile of `p`, `delay_ms` from now (debounce).
     pub fn enqueue_reconcile(&self, d: DriveId, p: &RelPath, delay_ms: i64) -> Result<()> {
         self.db
@@ -98,9 +111,7 @@ impl Engine {
             {
                 let local_to = op.path.clone();
                 self.db.finish_op(op.id)?;
-                if self.provider.local_status(d, &local_to)? != LocalStatus::Absent {
-                    self.provider.rename_local(d, &local_to, p)?;
-                }
+                self.relocate_local(d, &local_to, p)?;
                 self.db.log_activity(
                     Some(d.id),
                     Some(p),
@@ -108,8 +119,8 @@ impl Engine {
                     &format!("{from} was renamed to {local_to} here and to {p} in the cloud; kept the cloud name"),
                     false,
                 );
-            } else if self.provider.local_status(d, from)? != LocalStatus::Absent {
-                self.provider.rename_local(d, from, p)?;
+            } else {
+                self.relocate_local(d, from, p)?;
             }
             if !item.is_dir {
                 self.enqueue_reconcile(d.id, p, 0)?;
@@ -292,6 +303,11 @@ impl Engine {
         if p.is_root() {
             return Ok(Outcome::Done);
         }
+        // A pending local rename covers this path: the move op handles it
+        // (otherwise the old name would look deleted and the new one new).
+        if self.pending_move_involving(d.id, p)? {
+            return Ok(Outcome::Done);
+        }
         if self.ignore.is_ignored(p.name()) {
             return Ok(Outcome::Done);
         }
@@ -305,10 +321,22 @@ impl Engine {
         if item.as_ref().map(|i| i.unsyncable.is_some()).unwrap_or(false) {
             return Ok(Outcome::Done);
         }
-        if let Some(t) = self.db.pending_trash_covering(d.id, p)? {
-            return self.reconcile_trashed(d, p, &t).await;
-        }
         let local = self.provider.local_status(d, p)?;
+        if let Some(t) = self.db.pending_trash_covering(d.id, p)? {
+            if &t.path == p && !t.is_dir && matches!(local, LocalStatus::File(_)) {
+                // Deleted, then a file was saved under the same name again
+                // (editors save this way): it is an edit, not a delete.
+                self.db
+                    .set_trash_status(t.id, "replaced", Some("a new file was saved with the same name"))?;
+                if let Some(mut it) = item.clone() {
+                    it.local_state = LocalState::Downloaded;
+                    self.db.upsert_item(&it)?;
+                }
+            } else {
+                return self.reconcile_trashed(d, p, &t).await;
+            }
+        }
+        let item = self.db.item(d.id, p)?;
         let remote = self.stat_remote(d, p).await?;
         let is_dir = matches!(local, LocalStatus::Dir)
             || remote.as_ref().map(|r| r.is_dir).unwrap_or(false)
@@ -1012,6 +1040,25 @@ impl Engine {
             self.db.delete_subtree(d.id, from)?;
             return self.reconcile(d, to, Want::Sync).await;
         }
+        // Only rename in the cloud what the local item really is: a synced
+        // file or folder, or a placeholder that stayed a placeholder. A new
+        // local file that happens to sit where a cloud file appeared is not
+        // that cloud file (found by the property test).
+        let to_status = self.provider.local_status(d, to)?;
+        let corresponds = if it.is_dir {
+            it.synced.is_some() || it.remote.as_ref().map(|r| r.is_dir).unwrap_or(false)
+        } else {
+            it.synced.is_some() || (it.local_state == LocalState::Placeholder && to_status == LocalStatus::Placeholder)
+        };
+        if !corresponds {
+            self.restore_placeholder_at(d, &it)?;
+            return self.reconcile(d, to, Want::Sync).await;
+        }
+        // Never move onto something that exists in the cloud.
+        if self.stat_remote(d, to).await?.is_some() {
+            self.restore_placeholder_at(d, &it)?;
+            return self.reconcile(d, to, Want::Sync).await;
+        }
         let r = self.stat_remote(d, from).await?;
         let expected_id = it.remote.as_ref().or(it.synced.as_ref()).and_then(|m| m.id.clone());
         let same_object = match (&r, &expected_id) {
@@ -1026,9 +1073,7 @@ impl Engine {
                 if let Some(moved) = self.db.item_by_remote_id(d.id, id)? {
                     if &moved.path != from && &moved.path != to {
                         // Remote name wins.
-                        if self.provider.local_status(d, to)? != LocalStatus::Absent {
-                            self.provider.rename_local(d, to, &moved.path)?;
-                        }
+                        self.relocate_local(d, to, &moved.path)?;
                         self.db.log_activity(
                             Some(d.id),
                             Some(&moved.path),
@@ -1083,6 +1128,71 @@ impl Engine {
         } else {
             self.reconcile(d, to, Want::Sync).await
         }
+    }
+}
+
+impl Engine {
+    /// Follow a cloud rename locally: move `from` to `to`, but never over
+    /// something that exists at `to`. In that case the local item at `from`
+    /// stays (and is uploaded as new) and the rows now at `to` lose their
+    /// baseline, so the next reconcile keeps both versions (rule 9).
+    pub(crate) fn relocate_local(&self, d: &Drive, from: &RelPath, to: &RelPath) -> Result<()> {
+        let src = self.provider.local_status(d, from)?;
+        let dst = self.provider.local_status(d, to)?;
+        if src != LocalStatus::Absent && dst == LocalStatus::Absent {
+            self.provider.rename_local(d, from, to)?;
+            return Ok(());
+        }
+        let mut rows = self.db.subtree(d.id, to)?;
+        if let Some(it) = self.db.item(d.id, to)? {
+            if !rows.iter().any(|r| r.path == it.path) {
+                rows.push(it);
+            }
+        }
+        rows.sort_by_key(|r| r.path.depth());
+        for mut r in rows {
+            let st = self.provider.local_status(d, &r.path)?;
+            if !r.is_dir {
+                r.synced = None;
+                r.local_base = None;
+                r.dirty = false;
+                r.local_state = if matches!(st, LocalStatus::File(_)) {
+                    LocalState::Downloaded
+                } else {
+                    LocalState::Placeholder
+                };
+            }
+            self.db.upsert_item(&r)?;
+            if st == LocalStatus::Absent {
+                let parent = r.path.parent().unwrap_or_default();
+                if self.provider.is_populated(d, &parent) {
+                    self.provider.upsert_placeholders(d, &parent, &[r.meta()])?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The cloud item at `it.path` is still there but the local one moved
+    /// away (or never was it): show it as a placeholder again.
+    fn restore_placeholder_at(&self, d: &Drive, it: &Item) -> Result<()> {
+        if it.remote.is_none() {
+            self.db.delete_subtree(d.id, &it.path)?;
+            return Ok(());
+        }
+        let mut it = it.clone();
+        if !it.is_dir {
+            it.local_state = LocalState::Placeholder;
+            it.local_base = None;
+            it.synced = None;
+            it.dirty = false;
+        }
+        self.db.upsert_item(&it)?;
+        let parent = it.path.parent().unwrap_or_default();
+        if self.provider.is_populated(d, &parent) && self.provider.local_status(d, &it.path)? == LocalStatus::Absent {
+            self.provider.upsert_placeholders(d, &parent, &[it.meta()])?;
+        }
+        Ok(())
     }
 }
 

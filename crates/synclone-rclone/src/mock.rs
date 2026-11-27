@@ -247,6 +247,10 @@ impl MockRclone {
         }
     }
 
+    pub fn list_remotes_sync(&self) -> Vec<String> {
+        self.inner.lock().unwrap().config.keys().cloned().collect()
+    }
+
     pub fn store(&self, fs: &str) -> MockStore {
         self.inner.lock().unwrap().stores.get(fs).cloned().unwrap_or_default()
     }
