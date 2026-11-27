@@ -62,3 +62,81 @@ rclone v1.76.0's Drive config asks `config_shared_client_id` with the warning "r
 ## D-009 Async runtime and HTTP stack
 
 The rclone client and engine are async (`tokio`), and the `RcloneApi` trait uses `async-trait` so it can be a trait object (`Arc<dyn RcloneApi>`), with the real client and the mock behind one type. HTTP is `reqwest` with no TLS features: the only server is rclone on 127.0.0.1.
+
+## D-010 Engine shape: reconcile from current state, one path at a time
+
+The engine has no in-memory sync state machine. Each `reconcile(path)` reads the last-synced baseline (DB), the local file (provider) and a fresh remote `stat`, then applies PLAN.md §5. Because every decision is re-derived, a reconcile is idempotent: repeating it after a crash is safe. Intent that can't be re-derived from state is journaled as its own op: `move` (local renames), `pin`, `hydrate` (user opened a placeholder), `empty_trash`, `list`. Finished ops are deleted, so the `ops` table holds only unfinished or failed work. Failures back off exponentially (×4 for rate limits) and end as `failed` rows shown to the user. A file that is open or still changing is a deferral, not a failure.
+
+## D-011 Schema additions to PLAN.md §2.6
+
+Additions to the plan's schema:
+
+- `items`: `pinned`, a local baseline (`local_size`, `local_mtime`) separate from the remote baseline (`synced_*`), `unsyncable` (reason text), and `listed_at` for folders. A root row (`path = ''`) carries the root's pinned flag and listing time.
+- `trash`: `size` and `note`.
+- `ops`: `not_before` (debounce/backoff) and `updated_at`.
+- `drives`: `state` (connected/disconnected), `imported`, the comparison rules from `fsinfo` (`hash_type`, `time_tolerance_ns`, `keeps_mod_times`), `poll_interval_secs`, `last_poll_at`, and `extra_options_json` for advanced mode later (§6.4).
+- New table `activity` for "Recent activity".
+
+Migrations are a list applied in order, tracked by `PRAGMA user_version`. The DB runs in WAL mode with a busy timeout.
+
+## D-012 Transfers in Phases 0–3
+
+Uploads use `operations/copyfile` from the file's local directory (D-006). Right before each upload the remote is re-stat'ed against the baseline. The local (size, mtime) is snapshotted before the transfer and becomes the baseline, so a write during the upload still counts as an edit. Downloads go to a staging folder via `copyfile`, are verified by size and (where the remote has one) hash, and are handed to `Provider::commit_download`. That call refuses if the local file changed since the decision. Streaming ranged hydration through `--rc-serve` (verified in D-003) is for the Windows provider in Phase 4, which needs `CfExecute` data transfer with progress.
+
+## D-013 Conflict copies are copies, and reused after a crash
+
+Rules 4 and 9:
+
+1. Record a `conflicts` row.
+2. Copy the local file to `name (conflict - <host> <YYYY-MM-DD HH.MM>).ext`.
+3. Upload the copy as a new file.
+4. Download the remote version over the original name (guarded by the local fingerprint).
+
+Copying rather than renaming means a crash between steps leaves both versions on disk. On retry, an existing conflict copy with identical content is reused instead of making another. Open files are deferred; a file is never replaced while a program holds it.
+
+## D-014 Emptying a trashed folder never deletes unseen data
+
+A trashed folder stores a snapshot of every item beneath it. "Empty trash" lists the folder recursively first:
+
+- If everything matches the snapshot, it uses `operations/purge` (the provider's trash where there is one).
+- Otherwise it deletes only the files that are exactly as they were, keeps changed and new files, and restores them as placeholders with a note.
+
+A trashed file that changed in the cloud is restored instead of deleted (rule 8 at empty time).
+
+## D-015 Cases found by the property test
+
+The 10,000-case property test found two real data-loss bugs, now fixed and covered by its seeds:
+
+1. A local rename of a never-synced file onto a cloud path did a server-side `movefile` that overwrote the cloud file. Local moves now rename in the cloud only when the local item is that cloud object (synced, or still a placeholder) and the destination is free. Otherwise the cloud item reappears as a placeholder and the moved file is reconciled as new (keep both).
+2. Following a cloud rename locally could overwrite a new local file at the destination. `relocate_local` never overwrites; it resets the destination's baseline so rule 9 keeps both. The stub provider's `rename_local` refuses to overwrite as a second barrier.
+
+Semantics settled on the way:
+
+- Deleting a file and then saving a new file under the same name (how many editors save) is an edit of that file. It cancels the trash entry and uploads.
+- Renaming a file onto a name that was just deleted replaces it.
+
+## D-016 Indexing: breadth-first, one folder per call, deletions last
+
+The crawler lists one folder at a time (`operations/list`, not recursive) and diffs it against the DB inside one transaction per folder. Memory is bounded by the largest folder plus the queue of folder paths. Measured with a counting allocator: peak extra Rust heap is under 256 KiB for both 10k and 100k items. SQLite's own allocations are outside that count; its page cache is capped by `cache_size`. Deletions are collected and applied only after the whole poll succeeds, so a failed listing deletes nothing.
+
+Renames are matched by provider ID. An ID that shows up at a new path counts as a rename only if the old path is really gone, because Drive allows several parents. Recursive fast-list for ListR backends is postponed: it trades API calls for memory that grows with the tree, and the Phase 2 exit asks for bounded memory. It can be added per backend later.
+
+The remote-ID lookup has to force its index (`INDEXED BY`). Without statistics SQLite chose a primary-key scan per new item, which made indexing quadratic.
+
+## D-017 Test strategy for the engine
+
+Layer 1–2 engine tests run against `MockRclone`, an in-memory remote with real local file I/O, call counting and fault injection, plus `StubProvider`. That covers one named test per §5 rule, 22 behaviour tests, and the 10,000-case property test (about 80 s on Linux). Real rclone is exercised end to end through the CLI tests (daemon + `rclone rcd` + `alias` remote onto a temp folder; a bare `local` remote would expose the whole disk), including SIGKILL of the daemon mid-upload. `PROPTEST_CASES` overrides the case count for quick local runs; CI runs the full 10,000.
+
+## D-018 Daemon and IPC
+
+The daemon is a library (`synclone-daemon`) with two entry points: the `synclone-daemon` binary and `synclonectl daemon`. IPC is JSON-RPC 2.0, one JSON object per line:
+
+- Unix: a socket in the state directory (mode 0600). A stale socket is removed only if nothing answers on it.
+- Windows: a named pipe `\\.\pipe\synclone-<user>` with remote clients rejected.
+
+The rclone login never leaves the daemon. Every path is overridable by environment variables (`SYNCLONE_STATE_DIR`, `SYNCLONE_ROOT`, `SYNCLONE_SOCKET`, `SYNCLONE_RCLONE_CONFIG`, `SYNCLONE_RCLONE`, `SYNCLONE_RCLONE_ARGS`), which is how tests stay away from real files. Until Phases 4 and 6, the daemon uses the stub provider on every OS and scans for local changes every 5 s, because the stub has no watcher.
+
+## D-019 VERIFY (§4.7) status
+
+- **OneDrive for Business / SharePoint:** rclone documents that these may modify Office files on upload. Drives whose `drive_type` is `business` or `documentLibrary` therefore compare by size and time only (`hash_type = None`, set in `probe_drive`). Not yet confirmed against a live tenant; the live smoke test (HUMAN_TODO) covers it.
+- **Google Docs:** not built on yet. The planned approach is Drive's `export_formats` link types (`url` on Windows, `webloc` on macOS) so Docs appear as read-only link files. rclone reports their size as -1, which the engine already treats as "unknown size". Confirming this needs a live Drive account (layer 4), so it stays open and nothing depends on it in Phases 0–3.
