@@ -407,9 +407,11 @@ fn kill_and_restart_resumes_in_flight_operations() {
             })
             .unwrap_or(false)
     });
+    // /proc and PR_SET_PDEATHSIG are Linux-only (macOS gap: PROGRESS.md).
+    let check_orphans = cfg!(target_os = "linux");
     let pid_file_before = rclone_pids();
     assert!(
-        pid_file_before.iter().any(|p| is_our_rclone(*p, &e)),
+        !check_orphans || pid_file_before.iter().any(|p| is_our_rclone(*p, &e)),
         "found our rclone process"
     );
     let complete_before = (0..3)
@@ -424,7 +426,7 @@ fn kill_and_restart_resumes_in_flight_operations() {
         .filter(|p| pid_file_before.contains(p))
         .filter(|p| is_our_rclone(*p, &e))
         .collect();
-    assert!(orphans.is_empty(), "rclone left running: {orphans:?}");
+    assert!(!check_orphans || orphans.is_empty(), "rclone left running: {orphans:?}");
 
     e.extra_env.clear();
     e.start();
