@@ -105,10 +105,12 @@ A trashed file that changed in the cloud is restored instead of deleted (rule 8 
 
 ## D-015 Cases found by the property test
 
-The 10,000-case property test found two real data-loss bugs, now fixed and covered by its seeds:
+The property test found three real data-loss bugs, now fixed and covered by its regression seeds:
 
 1. A local rename of a never-synced file onto a cloud path did a server-side `movefile` that overwrote the cloud file. Local moves now rename in the cloud only when the local item is that cloud object (synced, or still a placeholder) and the destination is free. Otherwise the cloud item reappears as a placeholder and the moved file is reconciled as new (keep both).
 2. Following a cloud rename locally could overwrite a new local file at the destination. `relocate_local` never overwrites; it resets the destination's baseline so rule 9 keeps both. The stub provider's `rename_local` refuses to overwrite as a second barrier.
+
+3. Found later by a macOS CI seed: a journaled local move whose source path, by the time it ran, held a different item's record (a cloud rename had moved a synced file's record there) treated the user's new file as that cloud file, moved it server-side and uploaded over it. The move op now records which item (ID, else synced version) was at the source when the user renamed it; if that changed, the cloud item stays where it is and the local file is reconciled as new. Named test: `local_move_whose_source_was_replaced_by_a_cloud_rename_keeps_both`.
 
 Semantics settled on the way:
 

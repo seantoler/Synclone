@@ -207,11 +207,18 @@ impl Engine {
                 self.enqueue_reconcile(drive, &path, deb)?;
             }
             E::LocalRenamed { drive, from, to } => {
+                // Remember which cloud object (if any) was at `from` when the
+                // user renamed it: by the time the move runs, a cloud rename
+                // may have put a different item's record there.
+                let was = self
+                    .db
+                    .item(drive, &from)?
+                    .map(|i| (i.synced, i.remote.and_then(|r| r.id)));
                 self.db.enqueue_op(
                     "move",
                     drive,
                     &to,
-                    &serde_json::json!({ "from": from.as_str() }),
+                    &serde_json::json!({ "from": from.as_str(), "was": was }),
                     self.now() + deb,
                 )?;
             }
@@ -1032,10 +1039,34 @@ impl Engine {
 
     /// A local rename (`from` → `to`), journaled as a "move" op.
     pub async fn apply_local_move(&self, d: &Drive, from: &RelPath, to: &RelPath) -> Result<Outcome> {
+        self.apply_local_move_checked(d, from, to, None).await
+    }
+
+    /// `was`: the record at `from` when the rename happened (see
+    /// `handle_event`). If the record there now is a different item, the
+    /// renamed local file is not it (found by the property test on macOS CI).
+    pub async fn apply_local_move_checked(
+        &self,
+        d: &Drive,
+        from: &RelPath,
+        to: &RelPath,
+        was: Option<Option<(Option<RemoteMeta>, Option<String>)>>,
+    ) -> Result<Outcome> {
         let Some(it) = self.db.item(d.id, from)? else {
             // Never synced: the new name is just a new local item.
             return self.reconcile(d, to, Want::Sync).await;
         };
+        if let Some(was) = was {
+            let now = (it.synced.clone(), it.remote.as_ref().and_then(|r| r.id.clone()));
+            let same = match was {
+                None => false,
+                Some((synced, id)) => id == now.1 && (id.is_some() || synced == now.0),
+            };
+            if !same {
+                self.restore_placeholder_at(d, &it)?;
+                return self.reconcile(d, to, Want::Sync).await;
+            }
+        }
         if it.synced.is_none() && it.remote.is_none() {
             self.db.delete_subtree(d.id, from)?;
             return self.reconcile(d, to, Want::Sync).await;

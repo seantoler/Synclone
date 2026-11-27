@@ -461,3 +461,45 @@ async fn import_existing_remotes_and_dedupe_names() {
     assert!(h.eng.import_remotes().await.unwrap().is_empty());
     assert!(h.mock.list_remotes_sync().contains(&"work".to_string()), "sign-in kept");
 }
+
+#[tokio::test]
+async fn local_move_whose_source_was_replaced_by_a_cloud_rename_keeps_both() {
+    // Found by the property test on macOS CI. A new local file is renamed
+    // onto `d/e/f.txt` and back while, in the cloud, a different (synced)
+    // file is renamed to `d/e/f.txt`. The journaled local move must not
+    // treat the user's file as that cloud file.
+    let h = harness().await;
+    h.put("d/c.txt", b"cloud file");
+    h.sync().await;
+    h.open("d/c.txt").await;
+    h.write_local("a.txt", b"my new file");
+    std::fs::create_dir_all(h.local("d/e")).unwrap();
+    std::fs::rename(h.local("a.txt"), h.local("d/e/f.txt")).unwrap();
+    h.eng
+        .handle_event(ProviderEvent::LocalRenamed {
+            drive: h.d.id,
+            from: rp("a.txt"),
+            to: rp("d/e/f.txt"),
+        })
+        .unwrap();
+    h.eng.free(h.d.id, &rp("d/c.txt"), true).unwrap();
+    std::fs::rename(h.local("d/e/f.txt"), h.local("a.txt")).unwrap();
+    h.eng
+        .handle_event(ProviderEvent::LocalRenamed {
+            drive: h.d.id,
+            from: rp("d/e/f.txt"),
+            to: rp("a.txt"),
+        })
+        .unwrap();
+    h.mock.rename(FS, "d/c.txt", "d/e/f.txt");
+    for _ in 0..3 {
+        h.sync().await;
+    }
+    let contents: Vec<Vec<u8>> = h.mock.store(FS).files.values().map(|o| (*o.data).clone()).collect();
+    assert!(
+        contents.contains(&b"cloud file".to_vec()),
+        "cloud file kept: {:?}",
+        h.mock.store(FS).files.keys()
+    );
+    assert!(contents.contains(&b"my new file".to_vec()), "new file uploaded");
+}

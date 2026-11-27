@@ -7,3 +7,5 @@ cc e7371e0d44dd461a3ee5519ce67c8f85a01bf1a25494970f65af04c26e9b7d10
 cc 339e89b3e5e8534b6e45cc5c8cd026aae64fd2b9ab5734cb57befb0ba386f412 # shrinks to acts = [LocalWrite(0), Open(0), Free(0), LocalWrite(0)]
 # Model fix: a renamed placeholder keeps standing for its file (Windows CI).
 cc 7620013e7bc5e93b1c4f187457bde9dc799cc4edc3504594e84c85fbafbae2ab
+# Engine fix: a journaled local move checks the item at its source is still the one renamed (macOS CI).
+cc 997a938a70fd887983e5791c9b2f3c7e9b1dc14f970dd51eb828c87f2b9532d0

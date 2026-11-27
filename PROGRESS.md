@@ -28,7 +28,7 @@ Phases 0–3 are complete (cloud session, Linux + CI on ubuntu/windows/macos). P
 
 ### Phase 3: Sync engine with the stub provider ✅
 - [x] Every §5 rule has a named passing test (`crates/synclone-provider-stub/tests/conflict_rules.rs`, 14 tests).
-- [x] Property test passes 10,000 cases (`property.rs`, about 80 s on Linux, about 165 s on Windows CI). It found two real data-loss bugs, now fixed (D-015). Later CI seeds found only gaps in the test model (D-020), kept as regression seeds. Beyond the CI runs, 4 × 10,000 extra cases passed locally.
+- [x] Property test passes 10,000 cases (`property.rs`, about 80 s on Linux, about 165 s on Windows CI). It found three real data-loss bugs, now fixed with named tests (D-015). Other CI seeds found gaps in the test model (D-020). All failing seeds are kept as regression cases, and 8 × 10,000 extra cases passed locally after the last fix.
 - [x] Kill-and-restart test resumes all in-flight operations (`kill_and_restart_resumes_in_flight_operations`: SIGKILL mid-upload, no orphan rclone, all files arrive after restart). Unix only.
 - [x] `synclonectl` performs every action in §1.1 (`every_user_action_through_the_cli`).
 
@@ -41,7 +41,7 @@ Phases 0–3 are complete (cloud session, Linux + CI on ubuntu/windows/macos). P
 | synclone-core unit | 10 |
 | index scale (`tests/index_scale.rs`) | 1 |
 | conflict rules | 14 |
-| engine behaviour | 22 |
+| engine behaviour | 23 |
 | property (10,000 cases) | 1 |
 | CLI end to end vs real rclone | 5 |
 

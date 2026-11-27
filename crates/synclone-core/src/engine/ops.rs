@@ -170,7 +170,11 @@ impl Engine {
                     .and_then(|v| v.as_str())
                     .and_then(RelPath::new)
                     .ok_or_else(|| anyhow::anyhow!("move op without a source"))?;
-                self.apply_local_move(&d, &from, &op.path).await
+                let was: Option<Option<(Option<RemoteMeta>, Option<String>)>> = op
+                    .payload
+                    .get("was")
+                    .map(|w| serde_json::from_value(w.clone()).unwrap_or(None));
+                self.apply_local_move_checked(&d, &from, &op.path, was).await
             }
             "list" => {
                 self.index_dir(&d, &op.path).await?;
