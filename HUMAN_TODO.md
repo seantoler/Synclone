@@ -33,9 +33,19 @@ Run the real app against your real accounts. This uses your normal rclone config
 5. Go through `docs/MANUAL_CHECKLIST.md` items 6–13 with one of these drives, preferably on a test folder.
 6. Tell the agent what worked and what did not (screenshots welcome). Remove a drive afterwards with its tray submenu, then Disconnect…; that never deletes anything in the cloud.
 
-## 4. Remove a folder an agent test created by mistake
+## 4. Remove leftovers of agent test runs
 
 A test written during the Phase 5 session wrote its log to the real app-data folder before it was fixed. `%LOCALAPPDATA%\Synclone` was created then (2026-11-27 16:40) and holds only `logs\daemon.log` (159 bytes). The agent may not delete outside temp folders and the repo, so please delete `%LOCALAPPDATA%\Synclone` yourself. It is recreated properly the first time you run the app.
+
+Two layer 3 test runs left stale sync-root registry keys behind. WinRT no longer knows them ("Element not found") and their folders are gone. If Explorer shows a dead "Synclone test ..." entry in its navigation pane, remove them in an **administrator** PowerShell:
+
+```powershell
+Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\SyncRootManager' |
+  Where-Object { $_.PSChildName -like 'Synclone!*!test-*' } |
+  Remove-Item -Recurse
+```
+
+Only keys whose account starts with `test-` are touched; the real app uses the account `default`.
 
 ## 5. Live test remotes for layer 4 (when convenient; not blocking)
 
