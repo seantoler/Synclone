@@ -44,7 +44,7 @@ The aliases `gdrive-test1`, `gdrive-test2`, `onedrive-test` and `drime-test` are
 
 1. In the repo, run (from Claude Code, prefix it with `!`):
    `powershell -ExecutionPolicy Bypass -File scripts\export-live-test-config.ps1 gdrive-test1,gdrive-test2,onedrive-test,drime-test`
-2. It prints each alias with its target and the account remotes it copied (names and types only), and writes `%USERPROFILE%\.synclone-live-testclone.conf`, readable by you only. It stops without writing if any alias is not an alias into a `_synclone-test` folder.
+2. It prints each alias with its target and the account remotes it copied (names and types only), and writes `%USERPROFILE%\.synclone-live-test\rclone.conf`, readable by you only. It stops without writing if any alias is not an alias into a `_synclone-test` folder.
 3. Tell the agent it is done; it runs the live round trips with that file. Delete the file whenever you like; re-run the script to make it again.
 
 These also settle the two open live checks: Google Docs as link files, and OneDrive for Business file mutation (DECISIONS.md D-019).
