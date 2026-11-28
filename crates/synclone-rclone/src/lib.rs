@@ -11,6 +11,7 @@ pub mod daemon;
 pub mod error;
 pub mod locate;
 pub mod mock;
+pub mod test_root;
 pub mod types;
 
 pub use api::{join_remote, split_remote, RcloneApi, REMOTE_WRITE_CALLS};
@@ -18,4 +19,5 @@ pub use client::{Endpoint, RcClient};
 pub use daemon::{DaemonConfig, DaemonState, RcloneDaemon};
 pub use error::{ErrorKind, RcloneError, Result};
 pub use mock::MockRclone;
+pub use test_root::TestRoot;
 pub use types::*;

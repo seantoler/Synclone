@@ -38,14 +38,13 @@ Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\SyncRoot
 
 Only keys whose account starts with `test-` are touched; the real app uses the account `default`.
 
-## 5. Live test remotes for layer 4 (when convenient; not blocking)
+## 5. Export the live-test remotes once (layer 4; the aliases exist now)
 
-For each of Google Drive, OneDrive and Drime:
+The aliases `gdrive-test1`, `gdrive-test2`, `onedrive-test` and `drime-test` are set up. The tests may not read your real rclone config, so copy just those remotes into a separate file yourself (D-029):
 
-1. Create a folder named `_synclone-test` at the top of the account (web UI).
-2. Create an rclone remote for the account if you don't have one (`rclone config`). Name it e.g. `gdrive`.
-3. Create an **alias** remote pointing at the test folder, e.g. `rclone config create gdrive-test alias remote=gdrive:_synclone-test`.
-4. Repeat for `onedrive-test` and `drime-test`. For Drime, first create an API access token in the Drime web control panel and use it for the `drime` remote (`rclone config create drime drime access_token=<token>`).
-5. Tell the agent the alias names. It will run the smoke tests with `SYNCLONE_LIVE_TEST_REMOTES=gdrive-test,onedrive-test,drime-test`. The harness refuses any remote that is not an `alias` into `_synclone-test`.
+1. In the repo, run (from Claude Code, prefix it with `!`):
+   `powershell -ExecutionPolicy Bypass -File scripts\export-live-test-config.ps1 gdrive-test1,gdrive-test2,onedrive-test,drime-test`
+2. It prints each alias with its target and the account remotes it copied (names and types only), and writes `%USERPROFILE%\.synclone-live-testclone.conf`, readable by you only. It stops without writing if any alias is not an alias into a `_synclone-test` folder.
+3. Tell the agent it is done; it runs the live round trips with that file. Delete the file whenever you like; re-run the script to make it again.
 
 These also settle the two open live checks: Google Docs as link files, and OneDrive for Business file mutation (DECISIONS.md D-019).
