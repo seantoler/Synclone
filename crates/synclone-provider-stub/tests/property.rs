@@ -71,6 +71,10 @@ struct World {
     must_exist: HashSet<Vec<u8>>,
     /// What the engine last saw in the cloud (after a poll), per path.
     seen_remote: BTreeMap<String, Vec<u8>>,
+    /// Local placeholder renames the cloud does not show yet: new path to
+    /// the content the placeholder stands for. A poll in between must not
+    /// make the model forget them.
+    placeholder_moves: BTreeMap<String, Vec<u8>>,
     /// Content the user deleted locally at a path (a later write there replaces it).
     deleted_at: BTreeMap<String, Vec<u8>>,
     /// Every content written, by md5 (the mock's hash type).
@@ -104,6 +108,7 @@ impl World {
             next: 0,
             must_exist: HashSet::new(),
             seen_remote: BTreeMap::new(),
+            placeholder_moves: BTreeMap::new(),
             deleted_at: BTreeMap::new(),
             by_hash: Default::default(),
         }
@@ -139,6 +144,16 @@ impl World {
             .iter()
             .map(|(k, v)| (k.clone(), (*v.data).clone()))
             .collect();
+        // A renamed placeholder still stands for its file until the cloud
+        // shows the rename (then the cloud's version at that path counts).
+        let moves = std::mem::take(&mut self.placeholder_moves);
+        for (to, c) in moves {
+            if self.seen_remote.contains_key(&to) || !self.is_placeholder(&to) {
+                continue;
+            }
+            self.seen_remote.insert(to.clone(), c.clone());
+            self.placeholder_moves.insert(to, c);
+        }
     }
 
     /// The content a placeholder at `p` stands for, if the cloud still has
@@ -266,8 +281,10 @@ impl World {
                     let stands_for = self.placeholder_content(from);
                     std::fs::rename(&src_stub, &dst_stub).unwrap();
                     self.seen_remote.remove(from);
-                    if let Some(c) = stands_for {
-                        self.seen_remote.insert(to.to_string(), c);
+                    let moved = self.placeholder_moves.remove(from);
+                    if let Some(c) = stands_for.or(moved) {
+                        self.seen_remote.insert(to.to_string(), c.clone());
+                        self.placeholder_moves.insert(to.to_string(), c);
                     }
                 } else {
                     return;
@@ -454,4 +471,32 @@ proptest! {
             w.check(&acts);
         });
     }
+}
+
+/// Shrunk case from CI (windows-latest): a poll between a placeholder
+/// rename and an overwrite of the new name made the model forget what the
+/// placeholder stood for. The engine was right; the model is fixed.
+#[test]
+fn regression_free_rename_poll_write() {
+    use Act::*;
+    let acts = [
+        LocalWrite(1),
+        EmptyTrash,
+        Free(1),
+        LocalRename(1, 3),
+        PollOnly,
+        LocalWrite(3),
+    ];
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let mut w = World::new().await;
+        for a in &acts {
+            w.apply(a).await;
+        }
+        w.quiesce().await;
+        w.check(&acts);
+    });
 }

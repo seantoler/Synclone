@@ -57,6 +57,7 @@ The Windows kill-and-restart test was also checked the other way round: with the
 2. Phase 6 on the MacBook: spikes (App Group socket from a sandboxed extension; `.appex` in the Tauri bundle), then the File Provider shim. The tray app's code is cross-platform Tauri already. The daemon picks the stub provider on macOS until the native one exists (`SYNCLONE_PROVIDER`).
 
 ## Known gaps / failures
+- CI on the PR (windows-latest) found a shrunk property-test case that lost "content-1". Cause: the test's model, not the engine. A poll between a placeholder rename and an overwrite of the new name made the model forget what the placeholder stood for. Fixed in the model; the case is kept as `regression_free_rename_poll_write`, and 10,000 fresh cases pass again.
 - Layer 3 on CI is unverified (above).
 - When a layer 3 test process dies before unregistering, its sync root can be left as a stale HKLM registry key that WinRT no longer lists, so the harness sweep cannot remove it (two exist now; HUMAN_TODO 4). A test-only issue; the app's own registration is stable.
 - A file opened while its parent folder is renamed, before the engine applies the cloud rename, fails to download with "try again" (FETCH_DATA reads from the new path). It works once the rename syncs, about 3 s later (D-022).
