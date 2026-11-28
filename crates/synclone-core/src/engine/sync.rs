@@ -1225,6 +1225,17 @@ impl Engine {
             self.provider.rename_local(d, from, to)?;
             return Ok(());
         }
+        if src != LocalStatus::Absent {
+            // The local item stays at `from`. Nothing else may queue it: when
+            // a pending local move is dropped (rule 11), its event is spent
+            // (found by the property test on macOS CI).
+            self.enqueue_reconcile(d.id, from, 0)?;
+            for c in self.db.subtree(d.id, from)? {
+                if !c.is_dir && c.local_state != LocalState::Placeholder {
+                    self.enqueue_reconcile(d.id, &c.path, 0)?;
+                }
+            }
+        }
         let mut rows = self.db.subtree(d.id, to)?;
         if let Some(it) = self.db.item(d.id, to)? {
             if !rows.iter().any(|r| r.path == it.path) {

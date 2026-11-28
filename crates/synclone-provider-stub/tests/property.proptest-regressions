@@ -9,3 +9,5 @@ cc 339e89b3e5e8534b6e45cc5c8cd026aae64fd2b9ab5734cb57befb0ba386f412 # shrinks to
 cc 7620013e7bc5e93b1c4f187457bde9dc799cc4edc3504594e84c85fbafbae2ab
 # Engine fix: a journaled local move checks the item at its source is still the one renamed (macOS CI).
 cc 997a938a70fd887983e5791c9b2f3c7e9b1dc14f970dd51eb828c87f2b9532d0
+# Engine fix: a file left behind when a dropped local move cannot follow a cloud rename is queued (macOS CI).
+cc 21b8b6e634cf5dbe67d9de2614e2c6e624027cb1deb40f0d9cc75c80ee28730e
