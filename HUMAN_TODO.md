@@ -37,15 +37,3 @@ Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\SyncRoot
 ```
 
 Only keys whose account starts with `test-` are touched; the real app uses the account `default`.
-
-## 5. Live test remotes for layer 4 (when convenient; not blocking)
-
-For each of Google Drive, OneDrive and Drime:
-
-1. Create a folder named `_synclone-test` at the top of the account (web UI).
-2. Create an rclone remote for the account if you don't have one (`rclone config`). Name it e.g. `gdrive`.
-3. Create an **alias** remote pointing at the test folder, e.g. `rclone config create gdrive-test alias remote=gdrive:_synclone-test`.
-4. Repeat for `onedrive-test` and `drime-test`. For Drime, first create an API access token in the Drime web control panel and use it for the `drime` remote (`rclone config create drime drime access_token=<token>`).
-5. Tell the agent the alias names. It will run the smoke tests with `SYNCLONE_LIVE_TEST_REMOTES=gdrive-test,onedrive-test,drime-test`. The harness refuses any remote that is not an `alias` into `_synclone-test`.
-
-These also settle the two open live checks: Google Docs as link files, and OneDrive for Business file mutation (DECISIONS.md D-019).
