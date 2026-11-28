@@ -159,6 +159,9 @@ The spike used `cloud-filter` 0.1.0 (MIT, Nov 2026, on `windows` 0.62) instead o
 - `attrib +U` produces no dehydrate callback: the provider must free files itself.
 - Handles: `CfConvertToPlaceholder` and metadata updates reject `CfOpenFileWithOplock` handles ("The handle is invalid"). An attribute-only Win32 handle works for convert, update and hydrate, but it also lets a dehydrate succeed while another program reads the file. Anything that drops content therefore uses an exclusive handle (read/write with no sharing, or an exclusive oplock handle); both fail while another program has the file open. Identity, metadata and in-sync changes use attribute-only handles, which never hydrate and never conflict.
 
+
+VERIFY (§7 layer 3), settled 2026-11-28: GitHub's `windows-latest` runner supports the Cloud Files API. On the pull request's CI, all 10 layer 3 tests in `cloud_files.rs` ran and passed. The only skip was the opt-in 5 GB test. So layer 3 stays an ordinary CI test on Windows, with no gate.
+
 ## D-022 Windows layout and how user actions map to the engine
 
 - **One sync root:** provider name `Synclone`, account `default`, display name `Synclone`, full hydration, full population, pinning allowed, no auto-dehydration. Explorer's navigation pane comes from the WinRT registration. A different account (`SYNCLONE_SYNC_ROOT_ACCOUNT`) gives tests their own root, so they never touch the user's.
