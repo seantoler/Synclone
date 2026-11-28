@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Map, Value};
 use synclone_core::db::Db;
 use synclone_core::*;
-use synclone_provider_windows::{WindowsProvider, WindowsProviderConfig};
+use synclone_provider_windows::{recycle_bin, WindowsProvider, WindowsProviderConfig};
 use synclone_rclone::{ConfigOpts, DaemonConfig, RcloneApi, RcloneDaemon};
 
 pub struct H {
@@ -189,6 +189,67 @@ fn sweep_leftovers(tmp: &Path) {
             }
         }
     }
+    // Recycle Bin entries earlier runs left: only those that came from a
+    // `w<pid>-<n>` folder of a finished run here (the user's own are never
+    // matched).
+    if let Ok(entries) = recycle_bin::entries_under(tmp) {
+        for e in entries {
+            // `entries_under` matched the prefix (ignoring case); the first
+            // folder below it names the run.
+            let o = e.original.display().to_string().replace('/', "\\");
+            let t = tmp.display().to_string().replace('/', "\\");
+            let below = o.get(t.trim_end_matches('\\').len()..).unwrap_or("");
+            let top = below
+                .trim_start_matches('\\')
+                .split('\\')
+                .next()
+                .unwrap_or("")
+                .to_string();
+            if let Some(pid) = top.strip_prefix('w').and_then(pid_of) {
+                // A live process with that ID that started after the delete
+                // is a reused ID, not the run that made the entry.
+                if dead(pid) || (pid != std::process::id() && started_after(pid, e.deleted)) {
+                    let _ = recycle_bin::purge(&e);
+                }
+            }
+        }
+    }
+}
+
+/// Remove this test's own Recycle Bin entries (anything deleted from
+/// inside its folder), so test runs leave the bin as they found it.
+pub fn purge_own_recycle_bin_entries(base: &Path) {
+    match recycle_bin::entries_under(base) {
+        Ok(entries) => {
+            for e in entries {
+                if let Err(err) = recycle_bin::purge(&e) {
+                    eprintln!("removing a test's Recycle Bin entry: {err:#}");
+                }
+            }
+        }
+        Err(err) => eprintln!("reading the Recycle Bin: {err:#}"),
+    }
+}
+
+/// Whether process `pid` started after `filetime` (100 ns since 1601).
+fn started_after(pid: u32, filetime: i64) -> bool {
+    use windows::Win32::Foundation::{CloseHandle, FILETIME};
+    use windows::Win32::System::Threading::{GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    unsafe {
+        let Ok(h) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+            return false;
+        };
+        let (mut c, mut e, mut k, mut u) = (
+            FILETIME::default(),
+            FILETIME::default(),
+            FILETIME::default(),
+            FILETIME::default(),
+        );
+        let ok = GetProcessTimes(h, &mut c, &mut e, &mut k, &mut u).is_ok();
+        let _ = CloseHandle(h);
+        let created = ((c.dwHighDateTime as i64) << 32) | c.dwLowDateTime as i64;
+        ok && created > filetime
+    }
 }
 
 fn process_alive(pid: u32) -> bool {
@@ -213,6 +274,7 @@ impl Drop for H {
         if let Err(e) = self.prov.unregister() {
             eprintln!("unregistering the test sync root: {e:#}");
         }
+        purge_own_recycle_bin_entries(&self.base);
         // Inside target/tmp only.
         let _ = std::fs::remove_dir_all(&self.base);
     }
