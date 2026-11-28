@@ -68,6 +68,16 @@ impl Config {
         if let Some(ms) = std::env::var("SYNCLONE_DEBOUNCE_MS").ok().and_then(|s| s.parse().ok()) {
             settings.debounce_ms = ms;
         }
+        // `SYNCLONE_ONLY_REMOTES`: comma-separated rclone remotes; only these
+        // become drives on import (a trial against test aliases, D-030).
+        settings.only_remotes = std::env::var("SYNCLONE_ONLY_REMOTES").ok().and_then(|v| {
+            let list: Vec<String> = v
+                .split(',')
+                .map(|r| r.trim().trim_end_matches(':').to_string())
+                .filter(|r| !r.is_empty())
+                .collect();
+            (!list.is_empty()).then_some(list)
+        });
         Self {
             rclone_config: env("SYNCLONE_RCLONE_CONFIG").or_else(|| env("RCLONE_CONFIG")),
             rclone: env("SYNCLONE_RCLONE"),

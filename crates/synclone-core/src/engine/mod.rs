@@ -74,6 +74,12 @@ pub struct EngineSettings {
     /// Re-list a folder on open if its listing is older than this (§4.3).
     pub relist_on_open_ms: i64,
     pub extra_ignore: Vec<String>,
+    /// The Google client new Drive remotes use; the built-in one by
+    /// default (D-030). `None`: rclone's shared client.
+    pub google_client: Option<crate::oauth::OAuthClient>,
+    /// Import only these rclone remotes as drives (`SYNCLONE_ONLY_REMOTES`);
+    /// `None` imports every remote (PLAN.md §1.1).
+    pub only_remotes: Option<Vec<String>>,
 }
 
 impl Default for EngineSettings {
@@ -88,6 +94,8 @@ impl Default for EngineSettings {
             default_poll_secs: 300,
             relist_on_open_ms: 30_000,
             extra_ignore: Vec::new(),
+            google_client: crate::oauth::built_in_google(),
+            only_remotes: None,
         }
     }
 }

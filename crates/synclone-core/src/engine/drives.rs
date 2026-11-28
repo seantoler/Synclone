@@ -182,7 +182,13 @@ impl Engine {
             .unwrap_or_default();
         let mut added = Vec::new();
         for r in remotes {
-            if hidden.contains(&r) || self.db.drive_by_remote(&r)?.is_some() {
+            let left_out = self
+                .settings
+                .only_remotes
+                .as_ref()
+                .map(|only| !only.contains(&r))
+                .unwrap_or(false);
+            if left_out || hidden.contains(&r) || self.db.drive_by_remote(&r)?.is_some() {
                 continue;
             }
             let cfg = self.api.config_get(&r).await.unwrap_or_default();
@@ -206,6 +212,9 @@ impl Engine {
     ) -> Result<Drive> {
         let display = self.unique_display_name(display_name.unwrap_or(service_name(kind)))?;
         let remote = self.unique_remote_name(&display).await?;
+        let mut parameters = parameters;
+        let client = self.settings.google_client.as_ref();
+        crate::oauth::apply_google_client(kind, &mut parameters, client);
         config_flow::create_remote(
             self.api.as_ref(),
             &remote,
@@ -216,6 +225,7 @@ impl Engine {
             &FlowSettings::default(),
         )
         .await
+        .map_err(|e| anyhow::anyhow!("{}", crate::oauth::redact(&e.to_string(), client)))
         .with_context(|| format!("could not set up {}", service_name(kind)))?;
         let d = self.new_drive(&remote, kind, display, false);
         self.insert_and_register(d).await

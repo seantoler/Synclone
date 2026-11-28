@@ -7,6 +7,7 @@ pub mod db;
 pub mod engine;
 pub mod ignore;
 pub mod names;
+pub mod oauth;
 pub mod provider;
 pub mod types;
 

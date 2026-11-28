@@ -2,16 +2,13 @@
 
 Each item has exact steps. Items are removed once done.
 
-## 1. Create Synclone's own Google OAuth client (before public release)
+## 1. Get Synclone's Google OAuth client verified (before public release)
 
-rclone's shared Google Drive client ID is being retired during 2026 (DECISIONS.md D-007). Until Synclone has its own, Drive sign-in uses the shared one and may stop working.
+The client exists, is published, and is wired into builds through `SYNCLONE_GOOGLE_CLIENT_ID` / `SYNCLONE_GOOGLE_CLIENT_SECRET` (D-030). Until Google verifies it, sign-in shows "Google hasn't verified this app" (Advanced, then "Go to Synclone (unsafe)"), and the restricted Drive scope caps the app at 100 users in total.
 
-1. Go to https://console.cloud.google.com/ and create a project named "Synclone".
-2. APIs & Services → Library → enable **Google Drive API**.
-3. APIs & Services → OAuth consent screen → External; app name "Synclone"; add the scope `https://www.googleapis.com/auth/drive`.
-4. Credentials → Create credentials → OAuth client ID → **Desktop app**. Note the client ID and secret.
-5. Do not commit them to the repo. Tell the agent they exist; it will wire them into the wizard as build-time configuration (desktop OAuth secrets are not confidential, but keep them out of git history until the approach is decided).
-6. Submit the app for Google verification (the Drive scope is restricted). This can take weeks.
+1. In the Google Cloud console, OAuth consent screen: add the home page and privacy policy URLs (the GitHub Pages site in `docs/`), an app logo and a support email.
+2. Submit the app for verification. The Drive scope is restricted, so expect a security assessment; this can take weeks.
+3. When a release workflow is added (Phase 8), add the same two names as repository secrets (Settings, then Secrets and variables, then Actions).
 
 ## 3. Sign in to the three priority services once (Phase 5 exit, needs a browser and your accounts)
 
