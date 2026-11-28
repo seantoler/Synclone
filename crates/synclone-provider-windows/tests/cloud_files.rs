@@ -7,7 +7,7 @@ mod common;
 
 use common::*;
 use synclone_core::*;
-use synclone_provider_windows::{attributes, is_dehydrated, is_pinned};
+use synclone_provider_windows::{attributes, is_dehydrated, is_pinned, recycle_bin};
 
 macro_rules! require_cloud_files {
     () => {
@@ -255,8 +255,37 @@ async fn deletes_go_to_the_trash_queue_not_the_cloud() {
         .into_iter()
         .find(|t| t.path.as_str() == "recycled.txt")
         .unwrap();
+    assert_eq!(
+        recycle_bin::find(&h.local("recycled.txt")).unwrap().len(),
+        1,
+        "in the Recycle Bin"
+    );
     h.eng.restore_trash(t.id, None).unwrap();
     wait_for("restored placeholder", 10, || h.local("recycled.txt").exists()).await;
+    // It was downloaded when deleted, so it comes back downloaded: taken
+    // from the Recycle Bin, not fetched again (D-032).
+    wait_for("restored download", 20, || {
+        !is_dehydrated(&h.local("recycled.txt"))
+            && h.eng
+                .db
+                .activity(20)
+                .unwrap()
+                .iter()
+                .any(|a| a.message.contains("recycled.txt from the Recycle Bin"))
+    })
+    .await;
+    assert_eq!(read(&h.local("recycled.txt")), "recycled");
+    assert!(
+        recycle_bin::find(&h.local("recycled.txt")).unwrap().is_empty(),
+        "taken out of the Recycle Bin"
+    );
+    let it = h
+        .eng
+        .db
+        .item(h.d.id, &RelPath::new("recycled.txt").unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(it.local_state, LocalState::Downloaded);
     h.eng.request_empty_trash().unwrap();
     wait_for("deleted from the cloud", 20, || h.cloud_file("gone.txt").is_none()).await;
     assert_eq!(h.cloud_file("keep.txt").unwrap(), b"keep");
@@ -435,4 +464,52 @@ async fn five_gigabyte_file_hydrates_and_uploads() {
         "RESULT: 5 GiB hydrated in {hydrate_secs:.1} s (incl. hashing), written + uploaded in {upload_secs:.1} s"
     );
     drop(h);
+}
+
+/// Folders open in Explorer are hot (D-031): the provider sees the window,
+/// and a cloud change there shows up without a full poll. Opens a real
+/// Explorer window for a few seconds, so it is opt-in.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn folders_open_in_explorer_are_checked_often() {
+    require_cloud_files!();
+    if std::env::var("SYNCLONE_EXPLORER_WINDOW_TEST").as_deref() != Ok("1") {
+        eprintln!("SKIPPED: set SYNCLONE_EXPLORER_WINDOW_TEST=1 to open an Explorer window for this test");
+        return;
+    }
+    let h = harness_with(|c| {
+        std::fs::create_dir_all(c.join("docs")).unwrap();
+        std::fs::write(c.join("docs").join("a.txt"), b"a").unwrap();
+    })
+    .await;
+    names(&h.local("docs"));
+    let dir = h.local("docs");
+    let close = format!(
+        "(New-Object -ComObject Shell.Application).Windows() | Where-Object {{ $_.Document -and $_.Document.Folder.Self.Path -eq {} }} | ForEach-Object {{ $_.Quit() }}",
+        q(&dir)
+    );
+    // explorer.exe hands the window to the running shell and exits.
+    let _ = std::process::Command::new("explorer.exe").arg(&dir).status();
+    let seen = {
+        let mut ok = false;
+        for _ in 0..40 {
+            if h.prov.open_folders(&h.d).contains(&RelPath::new("docs").unwrap()) {
+                ok = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+        ok
+    };
+    if !seen {
+        ps(&close);
+        panic!("the open Explorer window was not seen");
+    }
+    std::fs::write(h.cloud_path("docs/new.txt"), b"new").unwrap();
+    let r = h.eng.poll_hot(h.d.id).await.unwrap();
+    ps(&close);
+    assert!(r.folders >= 1, "{r:?}");
+    assert!(
+        h.local("docs/new.txt").exists(),
+        "a new cloud file in the open folder appears"
+    );
 }

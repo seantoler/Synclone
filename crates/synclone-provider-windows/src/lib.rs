@@ -10,14 +10,20 @@
 //! Built on the `cloud-filter` crate (D-021 records the spike).
 
 #[cfg(windows)]
+mod explorer;
+#[cfg(windows)]
 mod filter;
 #[cfg(windows)]
 mod paths;
 #[cfg(windows)]
 mod provider;
 #[cfg(windows)]
+pub mod recycle_bin;
+#[cfg(windows)]
 mod win;
 
+#[cfg(windows)]
+pub use explorer::open_folders as open_explorer_folders;
 #[cfg(windows)]
 pub use provider::{WindowsProvider, WindowsProviderConfig};
 #[cfg(windows)]

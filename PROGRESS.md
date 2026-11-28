@@ -57,6 +57,17 @@ The Windows kill-and-restart test was also checked the other way round: with the
 - [x] Live round trips pass on all four test aliases: two Google Drive accounts (`gdrive-test1`, `gdrive-test2`), OneDrive (`onedrive-test`) and Drime (`drime-test`). Each did upload, cloud change and placeholder, download, modify, conflict, trash, empty and cleanup, with the rest of `_synclone-test` unchanged (121 s in all; OneDrive was the slowest at about 38 s). Re-run: set `SYNCLONE_LIVE_TEST_CONFIG` to `%USERPROFILE%/.synclone-live-test/rclone.conf` and `SYNCLONE_LIVE_TEST_REMOTES=gdrive-test1,gdrive-test2,onedrive-test,drime-test`, then `cargo test -p synclone-provider-stub --test live -- --nocapture`.
 - [ ] Not covered yet (D-019): Google Docs as link files, and OneDrive for Business file mutation. Both need a test that creates a Google Doc or uses a work account; the aliases are ready for that.
 
+### Google OAuth client and trial mode (D-030)
+- [x] Synclone's own Google client is baked in from `SYNCLONE_GOOGLE_CLIENT_ID` / `SYNCLONE_GOOGLE_CLIENT_SECRET` and used for new Google Drive remotes (`tests/drive_setup.rs`, `tests/oauth_client.rs`: right fields, user's own client wins, nothing without it, secret redacted, never in a tracked file).
+- [x] `SYNCLONE_ONLY_REMOTES` and `scripts/trial.ps1` (a trial on the test aliases, apart from a real install).
+- [ ] A real sign-in with Synclone's client (wizard, then Google Drive) during the trial.
+
+### After the first trial (D-031 to D-033)
+- [x] Hot folders: open Explorer windows and recently used folders are checked every 20–30 s, with rate-limit backoff. Tests: `tests/hot_and_restore.rs` (stub) and `folders_open_in_explorer_are_checked_often` (real Explorer window, `SYNCLONE_EXPLORER_WINDOW_TEST=1`).
+- [x] Restoring a downloaded file brings it back downloaded: from the Recycle Bin when it still matches the cloud, else downloaded again (stub tests, plus the real-Windows trash test).
+- [x] Layer 3 tests remove their own Recycle Bin entries; the leftovers of earlier runs were swept (40 entries, all from `target\tmp`; the owner's 4 untouched).
+- UI unchanged on purpose: the owner is designing the tray menu and windows.
+
 ## Next
 1. Human: review and merge the pull request (after that the nightly random-seed property test starts running, D-028); run the live sign-ins (HUMAN_TODO 3).
 2. Phase 6 on the MacBook: spikes (App Group socket from a sandboxed extension; `.appex` in the Tauri bundle), then the File Provider shim. The tray app's code is cross-platform Tauri already. The daemon picks the stub provider on macOS until the native one exists (`SYNCLONE_PROVIDER`).

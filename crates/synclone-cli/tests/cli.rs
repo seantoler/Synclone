@@ -380,9 +380,14 @@ fn every_user_action_through_the_cli() {
     assert!(d.join("new/notes.txt").exists());
     // Restore.
     e.ctl(&["trash", "restore", &t[0]["id"].to_string()]);
-    assert!(local.join("new/notes.txt.sclstub").exists());
+    // It was downloaded when deleted, so it comes back downloaded (D-032):
+    // a placeholder first, then the file itself.
+    e.wait_for("restored download", || {
+        std::fs::read(local.join("new/notes.txt")).ok().as_deref() == Some(b"hello".as_slice())
+            && !local.join("new/notes.txt.sclstub").exists()
+    });
     // Delete again and empty the trash (needs confirmation).
-    std::fs::remove_file(local.join("new/notes.txt.sclstub")).unwrap();
+    std::fs::remove_file(local.join("new/notes.txt")).unwrap();
     e.ctl(&["sync"]);
     assert!(e.try_ctl(&["trash", "empty"]).is_err(), "needs --yes");
     assert!(d.join("new/notes.txt").exists());

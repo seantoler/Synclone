@@ -6,6 +6,7 @@
 //! - `ops`: the durable op journal runner.
 
 pub mod drives;
+pub mod hot;
 pub mod index;
 pub mod ops;
 pub mod sync;
@@ -74,6 +75,22 @@ pub struct EngineSettings {
     /// Re-list a folder on open if its listing is older than this (§4.3).
     pub relist_on_open_ms: i64,
     pub extra_ignore: Vec<String>,
+    /// The Google client new Drive remotes use; the built-in one by
+    /// default (D-030). `None`: rclone's shared client.
+    pub google_client: Option<crate::oauth::OAuthClient>,
+    /// Import only these rclone remotes as drives (`SYNCLONE_ONLY_REMOTES`);
+    /// `None` imports every remote (PLAN.md §1.1).
+    pub only_remotes: Option<Vec<String>>,
+    /// Hot folders (D-031): seconds between listings of open or recently
+    /// used folders. `None`: the service's default (20 s for Google Drive
+    /// and OneDrive, 30 s otherwise); `Some(0)` turns it off.
+    pub hot_poll_secs: Option<i64>,
+    /// How many hot folders per drive; `None`: the service's default.
+    pub hot_max_folders: Option<usize>,
+    /// A folder stays hot this long after it was last browsed or used.
+    pub hot_ttl_secs: i64,
+    /// The longest the hot interval grows to while rate-limited.
+    pub hot_max_backoff_secs: i64,
 }
 
 impl Default for EngineSettings {
@@ -88,6 +105,12 @@ impl Default for EngineSettings {
             default_poll_secs: 300,
             relist_on_open_ms: 30_000,
             extra_ignore: Vec::new(),
+            google_client: crate::oauth::built_in_google(),
+            only_remotes: None,
+            hot_poll_secs: None,
+            hot_max_folders: None,
+            hot_ttl_secs: 600,
+            hot_max_backoff_secs: 600,
         }
     }
 }
@@ -108,6 +131,8 @@ pub struct Engine {
     pub device: String,
     /// Paths with an op in flight (no two ops on one path at once).
     pub(crate) busy: std::sync::Mutex<std::collections::HashSet<(crate::types::DriveId, String)>>,
+    /// Hot folders per drive (D-031).
+    pub(crate) hot: std::sync::Mutex<std::collections::HashMap<crate::types::DriveId, hot::HotState>>,
 }
 
 impl Engine {
@@ -133,6 +158,7 @@ impl Engine {
             recovered_dir: state_dir.join("Recovered"),
             device: crate::conflict::device_name(),
             busy: Default::default(),
+            hot: Default::default(),
         })
     }
 

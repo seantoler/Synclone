@@ -193,6 +193,13 @@ impl Engine {
                     .map(|w| serde_json::from_value(w.clone()).unwrap_or(None));
                 self.apply_local_move_checked(&d, &from, &op.path, was).await
             }
+            "recover" => {
+                let fp = LocalFingerprint {
+                    size: op.payload.get("size").and_then(|v| v.as_i64()).unwrap_or(-1),
+                    mtime_ns: op.payload.get("mtime_ns").and_then(|v| v.as_i64()).unwrap_or(0),
+                };
+                self.recover_restored(&d, &op.path, fp).await
+            }
             "list" => {
                 self.index_dir(&d, &op.path).await?;
                 Ok(Outcome::Done)

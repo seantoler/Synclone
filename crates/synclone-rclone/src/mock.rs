@@ -312,6 +312,18 @@ impl MockRclone {
         }
     }
 
+    /// Make the next call to `method` fail with this message (as when
+    /// rclone echoes parameters back in an error).
+    pub fn fail_next_with(&self, method: &str, kind: ErrorKind, message: &str) {
+        let mut g = self.inner.lock().unwrap();
+        g.faults.entry(method.to_string()).or_default().push_back(RcloneError {
+            kind,
+            path: method.into(),
+            status: Some(400),
+            message: message.into(),
+        });
+    }
+
     /// Make every stat and transfer take `ms`, so concurrent operations
     /// really interleave (as they do against a real cloud).
     pub fn set_latency(&self, ms: u64) {
