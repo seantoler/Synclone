@@ -52,9 +52,10 @@ Phases 0–3 were completed in the cloud (Linux + CI). Phases 4 and 5 were built
 
 The Windows kill-and-restart test was also checked the other way round: with the job object assignment disabled, it fails ("rclone … was left running").
 
-### Layer 4: live cloud smoke tests (harness built; live run pending)
+### Layer 4: live cloud smoke tests ✅ (local run, 2026-11-28)
 - [x] Harness: `crates/synclone-provider-stub/tests/live.rs` with the `TestRoot` guard (`synclone_rclone::TestRoot`) and the alias check (D-029). Its self-test `local_alias_round_trip` passes, refusals included.
-- [ ] Live run against `gdrive-test1`, `gdrive-test2`, `onedrive-test`, `drime-test`: waits for the config export (HUMAN_TODO 5).
+- [x] Live round trips pass on all four test aliases: two Google Drive accounts (`gdrive-test1`, `gdrive-test2`), OneDrive (`onedrive-test`) and Drime (`drime-test`). Each did upload, cloud change and placeholder, download, modify, conflict, trash, empty and cleanup, with the rest of `_synclone-test` unchanged (121 s in all; OneDrive was the slowest at about 38 s). Re-run: set `SYNCLONE_LIVE_TEST_CONFIG` to `%USERPROFILE%/.synclone-live-test/rclone.conf` and `SYNCLONE_LIVE_TEST_REMOTES=gdrive-test1,gdrive-test2,onedrive-test,drime-test`, then `cargo test -p synclone-provider-stub --test live -- --nocapture`.
+- [ ] Not covered yet (D-019): Google Docs as link files, and OneDrive for Business file mutation. Both need a test that creates a Google Doc or uses a work account; the aliases are ready for that.
 
 ## Next
 1. Human: review and merge the pull request (after that the nightly random-seed property test starts running, D-028); run the live sign-ins (HUMAN_TODO 3).
