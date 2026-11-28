@@ -36,8 +36,14 @@ pub struct Config {
     pub rclone: Option<PathBuf>,
     /// `SYNCLONE_RCLONE_ARGS`: extra rclone flags (space separated), e.g. `--bwlimit 1M`.
     pub rclone_args: Vec<String>,
-    /// `SYNCLONE_SCAN_SECS`: local scan interval for the stub provider.
+    /// `SYNCLONE_SCAN_SECS`: how often to compare the drive folders with
+    /// the DB. The stub has no watcher and relies on it (default 5 s); the
+    /// Windows provider gets OS events and scans only as a safety net (60 s).
     pub scan_interval: Duration,
+    /// `SYNCLONE_PROVIDER`: `native` (Windows Cloud Files; the default on
+    /// Windows) or `stub` (plain folders; the default elsewhere until the
+    /// macOS provider exists, and what the CLI tests use).
+    pub provider: ProviderKind,
     pub settings: EngineSettings,
 }
 
@@ -52,6 +58,12 @@ impl Config {
             .ok()
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| default_socket(&state_dir));
+        let provider = match std::env::var("SYNCLONE_PROVIDER").as_deref() {
+            Ok("stub") => ProviderKind::Stub,
+            Ok("native") => ProviderKind::Native,
+            _ if cfg!(windows) => ProviderKind::Native,
+            _ => ProviderKind::Stub,
+        };
         let mut settings = EngineSettings::default();
         if let Some(ms) = std::env::var("SYNCLONE_DEBOUNCE_MS").ok().and_then(|s| s.parse().ok()) {
             settings.debounce_ms = ms;
@@ -66,14 +78,27 @@ impl Config {
                 std::env::var("SYNCLONE_SCAN_SECS")
                     .ok()
                     .and_then(|s| s.parse().ok())
-                    .unwrap_or(5),
+                    .unwrap_or(if provider == ProviderKind::Native { 60 } else { 5 }),
             ),
+            provider,
             state_dir,
             sync_root,
             socket,
             settings,
         }
     }
+}
+
+/// rclone types that wrap other storage, or the local disk: created only
+/// in advanced mode (PLAN.md §6.4), not offered by the default wizard.
+pub const ADVANCED_ONLY_SERVICES: &[&str] = &[
+    "alias", "cache", "chunker", "combine", "compress", "crypt", "hasher", "local", "memory", "union",
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderKind {
+    Stub,
+    Native,
 }
 
 pub fn default_socket(state_dir: &Path) -> String {
@@ -87,7 +112,6 @@ pub fn default_socket(state_dir: &Path) -> String {
 pub struct Daemon {
     pub engine: Arc<Engine>,
     pub rclone: Arc<RcloneDaemon>,
-    pub stub: Arc<StubProvider>,
     pub config: Config,
     wake: Notify,
     stop: tokio::sync::watch::Sender<bool>,
@@ -108,13 +132,55 @@ impl Daemon {
         rc.extra_args = config.rclone_args.clone();
         let rclone = RcloneDaemon::start(rc).await.context("starting rclone")?;
         let db = Arc::new(Db::open(&config.state_dir.join("state.db")).context("opening the state database")?);
-        // Phases 4 and 6 replace this with the Windows / macOS providers.
-        let stub = Arc::new(StubProvider::new(&config.sync_root, config.state_dir.join("recycle")));
+        // Settings saved from the app.
+        let mut config = config;
+        if let Some(pats) = db
+            .setting("extra_ignore")?
+            .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+        {
+            config.settings.extra_ignore.extend(pats);
+        }
+        if let Some(secs) = db.setting("poll_interval_secs")?.and_then(|s| s.parse().ok()) {
+            config.settings.default_poll_secs = secs;
+        }
+        if let Some(rate) = db.setting("bandwidth_limit")? {
+            if let Err(e) = rclone.client().bwlimit(&rate).await {
+                tracing::warn!("could not apply the bandwidth limit {rate}: {e}");
+            }
+        }
+        let provider: Arc<dyn Provider> = match config.provider {
+            ProviderKind::Stub => Arc::new(StubProvider::new(&config.sync_root, config.state_dir.join("recycle"))),
+            #[cfg(windows)]
+            ProviderKind::Native => Arc::new(
+                synclone_provider_windows::WindowsProvider::start(
+                    {
+                        let mut c = synclone_provider_windows::WindowsProviderConfig::new(&config.sync_root);
+                        // `SYNCLONE_SYNC_ROOT_ACCOUNT`: tests register their own sync
+                        // root and never touch the user's ("default").
+                        if let Ok(a) = std::env::var("SYNCLONE_SYNC_ROOT_ACCOUNT") {
+                            if !a.is_empty() {
+                                c.display_name = format!("{APP_NAME} ({a})");
+                                c.account = a;
+                            }
+                        }
+                        c
+                    },
+                    db.clone(),
+                    rclone.endpoint().clone(),
+                )
+                .context("connecting the Synclone folder to Windows")?,
+            ),
+            // macOS arrives in Phase 6.
+            #[cfg(not(windows))]
+            ProviderKind::Native => {
+                bail!("there is no native file provider for this OS yet; set SYNCLONE_PROVIDER=stub")
+            }
+        };
         let api: Arc<dyn RcloneApi> = rclone.client();
         let engine = Engine::new(
             db,
             api,
-            stub.clone() as Arc<dyn Provider>,
+            provider,
             Arc::new(SystemClock),
             config.settings.clone(),
             config.state_dir.clone(),
@@ -127,7 +193,6 @@ impl Daemon {
         Ok(Arc::new(Self {
             engine,
             rclone,
-            stub,
             config,
             wake: Notify::new(),
             stop,
@@ -218,7 +283,8 @@ impl Daemon {
         }
     }
 
-    /// The stub provider has no file watcher: scan for local changes.
+    /// Compare the drive folders with the DB: the stub's only change
+    /// detection, and a safety net for missed OS events otherwise.
     async fn scan_loop(&self) {
         loop {
             tokio::time::sleep(self.config.scan_interval).await;
@@ -325,6 +391,40 @@ impl Daemon {
         }
     }
 
+    fn drive_names(&self) -> Result<std::collections::HashMap<DriveId, String>> {
+        Ok(self
+            .engine
+            .drives()?
+            .into_iter()
+            .map(|d| (d.id, d.display_name))
+            .collect())
+    }
+
+    fn settings_json(&self) -> Result<Value> {
+        let db = &self.engine.db;
+        let poll = db
+            .setting("poll_interval_secs")?
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(self.engine.settings.default_poll_secs);
+        let ignore: Vec<String> = db
+            .setting("extra_ignore")?
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        Ok(json!({
+            "bandwidth_limit": db.setting("bandwidth_limit")?.unwrap_or_else(|| "off".into()),
+            "poll_minutes": poll / 60,
+            "ignore": ignore,
+            "builtin_ignore": synclone_core::ignore::DEFAULT_PATTERNS,
+            "sync_root": self.config.sync_root,
+            "state_dir": self.config.state_dir,
+        }))
+    }
+
+    /// A drive's folder on disk.
+    pub fn folder(&self, d: &Drive) -> PathBuf {
+        self.engine.provider.content_path(d, &RelPath::root())
+    }
+
     fn drive_arg(&self, p: &Value) -> Result<Drive> {
         if let Some(id) = p.get("drive_id").and_then(Value::as_i64) {
             return self.engine.drive(id);
@@ -390,25 +490,31 @@ impl Daemon {
                         "state": d.state,
                         "paused": d.paused,
                         "imported": d.imported,
-                        "folder": self.stub.drive_dir(&d),
+                        "folder": self.folder(&d),
                     }));
                 }
                 Value::Array(out)
             }
             "drive.services" => {
                 let provs = e.api.config_providers().await?;
+                // Wrappers and the local disk are advanced mode (§6.4).
+                let advanced = p.get("advanced").and_then(Value::as_bool).unwrap_or(false);
                 Value::Array(
                     provs
                         .into_iter()
-                        .filter(|p| !p.hide)
+                        .filter(|p| !p.hide && (advanced || !ADVANCED_ONLY_SERVICES.contains(&p.name.as_str())))
                         .map(|p| json!({"type": p.name, "name": synclone_core::engine::drives::service_name(&p.name), "description": p.description}))
                         .collect(),
                 )
             }
             "drive.add" => {
-                let kind = p.get("type").and_then(Value::as_str).ok_or_else(|| anyhow!("which kind of cloud storage?"))?;
+                let kind = p
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow!("which kind of cloud storage?"))?;
                 let name = p.get("name").and_then(Value::as_str);
-                let params: Map<String, Value> = p.get("params").and_then(Value::as_object).cloned().unwrap_or_default();
+                let params: Map<String, Value> =
+                    p.get("params").and_then(Value::as_object).cloned().unwrap_or_default();
                 let mut unanswered = Vec::new();
                 let mut ask = |q: &synclone_rclone::ConfigQuestion| {
                     unanswered.push(q.name.clone());
@@ -422,28 +528,43 @@ impl Daemon {
                 };
                 let r = e.add_drive(kind, name, params, &mut ask, &mut on_event).await;
                 match r {
-                    Ok(d) => json!({"id": d.id, "name": d.display_name, "folder": self.stub.drive_dir(&d)}),
+                    Ok(d) => json!({"id": d.id, "name": d.display_name, "folder": self.folder(&d)}),
                     Err(err) if !unanswered.is_empty() => {
-                        bail!("{err:#}. Provide these settings with --param name=value: {}", unanswered.join(", "))
+                        bail!(
+                            "{err:#}. Provide these settings with --param name=value: {}",
+                            unanswered.join(", ")
+                        )
                     }
                     Err(err) => return Err(err),
                 }
             }
             "drive.connect" => {
-                let remote = p.get("remote").and_then(Value::as_str).ok_or_else(|| anyhow!("which remote?"))?;
+                let remote = p
+                    .get("remote")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow!("which remote?"))?;
                 let d = e.connect_remote(remote, p.get("name").and_then(Value::as_str)).await?;
-                json!({"id": d.id, "name": d.display_name, "folder": self.stub.drive_dir(&d)})
+                json!({"id": d.id, "name": d.display_name, "folder": self.folder(&d)})
             }
             "drive.import" => {
                 let added = e.import_remotes().await?;
-                Value::Array(added.into_iter().map(|d| json!({"id": d.id, "name": d.display_name})).collect())
+                Value::Array(
+                    added
+                        .into_iter()
+                        .map(|d| json!({"id": d.id, "name": d.display_name}))
+                        .collect(),
+                )
             }
             "drive.remove" => {
                 let d = self.drive_arg(&p)?;
                 let recover = p.get("recover").and_then(Value::as_bool).unwrap_or(false);
                 let forget = p.get("forget").and_then(Value::as_bool).unwrap_or(false);
                 let sign_out = p.get("sign_out").and_then(Value::as_bool).unwrap_or(false);
-                let recovered = if d.state == DriveState::Connected { e.disconnect(d.id, recover).await? } else { None };
+                let recovered = if d.state == DriveState::Connected {
+                    e.disconnect(d.id, recover).await?
+                } else {
+                    None
+                };
                 if forget || sign_out {
                     e.forget_drive(d.id, sign_out).await?;
                 }
@@ -451,11 +572,14 @@ impl Daemon {
             }
             "drive.rename" => {
                 let d = self.drive_arg(&p)?;
-                let new = p.get("new_name").and_then(Value::as_str).ok_or_else(|| anyhow!("new name?"))?;
-                let old_dir = self.stub.drive_dir(&d);
+                let new = p
+                    .get("new_name")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow!("new name?"))?;
+                let old_dir = self.folder(&d);
                 let nd = e.rename_drive(d.id, new)?;
                 if old_dir.exists() {
-                    std::fs::rename(&old_dir, self.stub.drive_dir(&nd))?;
+                    std::fs::rename(&old_dir, self.folder(&nd))?;
                 }
                 json!({"name": nd.display_name})
             }
@@ -495,9 +619,12 @@ impl Daemon {
             "open" => {
                 let d = self.drive_arg(&p)?;
                 let path = Self::path_arg(&p)?;
-                e.handle_event(ProviderEvent::HydrationRequested { drive: d.id, path: path.clone() })?;
+                e.handle_event(ProviderEvent::HydrationRequested {
+                    drive: d.id,
+                    path: path.clone(),
+                })?;
                 e.run_until_idle(false, 50).await?;
-                json!({"path": self.stub.path_of(&d, &path)})
+                json!({"path": self.engine.provider.content_path(&d, &path)})
             }
             "download" => {
                 let d = self.drive_arg(&p)?;
@@ -507,7 +634,7 @@ impl Daemon {
                 if p.get("wait").and_then(Value::as_bool).unwrap_or(true) {
                     e.run_until_idle(false, 10_000).await?;
                 }
-                json!({"path": self.stub.path_of(&d, &path)})
+                json!({"path": self.engine.provider.content_path(&d, &path)})
             }
             "free" => {
                 let d = self.drive_arg(&p)?;
@@ -519,7 +646,12 @@ impl Daemon {
             "sync" => {
                 let ids: Vec<DriveId> = match self.drive_arg(&p) {
                     Ok(d) => vec![d.id],
-                    Err(_) => e.drives()?.into_iter().filter(|d| d.state == DriveState::Connected).map(|d| d.id).collect(),
+                    Err(_) => e
+                        .drives()?
+                        .into_iter()
+                        .filter(|d| d.state == DriveState::Connected)
+                        .map(|d| d.id)
+                        .collect(),
                 };
                 let mut reports = Vec::new();
                 for id in ids {
@@ -530,17 +662,70 @@ impl Daemon {
                 let run = e.run_until_idle(true, 10_000).await?;
                 json!({"drives": reports, "ops": run})
             }
-            "trash.list" => serde_json::to_value(
-                e.trash_list()?
+            "drive.service_options" => {
+                let kind = p
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow!("which kind of cloud storage?"))?;
+                let provs = e.api.config_providers().await?;
+                let prov = provs
                     .into_iter()
-                    .map(|t| json!({"id": t.id, "drive_id": t.drive_id, "path": t.path, "is_dir": t.is_dir, "size": t.size, "deleted_at": t.deleted_at}))
-                    .collect::<Vec<_>>(),
-            )?,
+                    .find(|x| x.name == kind)
+                    .ok_or_else(|| anyhow!("unknown kind of cloud storage {kind:?}"))?;
+                service_form(&prov)
+            }
+            "drive.suggest_name" => {
+                let kind = p.get("type").and_then(Value::as_str).unwrap_or("");
+                json!({"name": e.unique_display_name(synclone_core::engine::drives::service_name(kind))?})
+            }
+            "drive.cancel_signin" => {
+                e.api.oauth_stop().await?;
+                json!({"cancelled": true})
+            }
+            "settings.get" => self.settings_json()?,
+            "settings.set" => {
+                if let Some(rate) = p.get("bandwidth_limit").and_then(Value::as_str) {
+                    let rate = if rate.trim().is_empty() { "off" } else { rate.trim() };
+                    e.api.bwlimit(rate).await?;
+                    e.db.set_setting("bandwidth_limit", rate)?;
+                }
+                if let Some(mins) = p.get("poll_minutes").and_then(Value::as_i64) {
+                    let secs = mins.clamp(1, 24 * 60) * 60;
+                    e.db.set_setting("poll_interval_secs", &secs.to_string())?;
+                    for mut d in e.drives()? {
+                        d.poll_interval_secs = secs;
+                        e.db.update_drive(&d)?;
+                    }
+                }
+                if let Some(list) = p.get("ignore").and_then(Value::as_array) {
+                    let pats: Vec<String> = list
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string)
+                        .collect();
+                    e.db.set_setting("extra_ignore", &serde_json::to_string(&pats)?)?;
+                }
+                self.settings_json()?
+            }
+            "trash.list" => {
+                let names = self.drive_names()?;
+                serde_json::to_value(
+                    e.trash_list()?
+                        .into_iter()
+                        .map(|t| json!({"id": t.id, "drive_id": t.drive_id, "drive": names.get(&t.drive_id), "path": t.path, "is_dir": t.is_dir, "size": t.size, "deleted_at": t.deleted_at}))
+                        .collect::<Vec<_>>(),
+                )?
+            }
             "trash.restore" => {
                 if p.get("all").and_then(Value::as_bool).unwrap_or(false) {
                     json!({"restored": e.restore_all()?})
                 } else {
-                    let id = p.get("id").and_then(Value::as_i64).ok_or_else(|| anyhow!("which trash entry?"))?;
+                    let id = p
+                        .get("id")
+                        .and_then(Value::as_i64)
+                        .ok_or_else(|| anyhow!("which trash entry?"))?;
                     e.restore_trash(id, None)?;
                     json!({"restored": 1})
                 }
@@ -560,10 +745,22 @@ impl Daemon {
             }
             "conflicts.list" => {
                 let all = p.get("all").and_then(Value::as_bool).unwrap_or(false);
-                serde_json::to_value(e.db.conflicts(all)?)?
+                let mut out = Vec::new();
+                for c in e.db.conflicts(all)? {
+                    let d = e.drive(c.drive_id).ok();
+                    let mut v = serde_json::to_value(&c)?;
+                    v["drive"] = json!(d.as_ref().map(|d| d.display_name.clone()));
+                    // For "Show in folder".
+                    v["copy_local_path"] = json!(d.map(|d| e.provider.content_path(&d, &c.conflict_copy_path)));
+                    out.push(v);
+                }
+                Value::Array(out)
             }
             "conflicts.resolve" => {
-                let id = p.get("id").and_then(Value::as_i64).ok_or_else(|| anyhow!("which conflict?"))?;
+                let id = p
+                    .get("id")
+                    .and_then(Value::as_i64)
+                    .ok_or_else(|| anyhow!("which conflict?"))?;
                 e.db.resolve_conflict(id)?;
                 json!({"resolved": id})
             }
@@ -618,4 +815,60 @@ pub async fn run_from_env() -> Result<()> {
         d2.shutdown();
     });
     d.run().await
+}
+
+/// What the "Add cloud storage" wizard needs to sign in to a service
+/// (PLAN.md §6.2): browser sign-in, a pasted token, or a form built from
+/// the service's options (required ones first; the rest under Advanced).
+pub fn service_form(prov: &synclone_rclone::ProviderInfo) -> Value {
+    let has = |n: &str| prov.options.iter().any(|o| o.name == n);
+    let auth = if prov.name == "drime" || (has("access_token") && !has("token")) {
+        "token"
+    } else if has("token") && has("client_id") {
+        "browser"
+    } else {
+        "form"
+    };
+    // Handled by the sign-in itself, or never wanted (D-008).
+    let skip = |n: &str| {
+        matches!(
+            n,
+            "token" | "auth_url" | "token_url" | "config_is_local" | "hard_delete"
+        ) || (auth == "token" && n == "access_token")
+    };
+    let options: Vec<Value> = prov
+        .options
+        .iter()
+        .filter(|o| o.hide == 0 && !skip(&o.name))
+        .map(|o| {
+            let advanced = o.advanced || (auth == "browser" && !o.required) || matches!(o.name.as_str(), "client_id" | "client_secret");
+            json!({
+                "name": o.name,
+                "help": o.help.lines().next().unwrap_or(""),
+                "required": o.required,
+                "advanced": advanced,
+                "password": o.is_password || o.sensitive,
+                "default": o.default,
+                "kind": o.kind,
+                "examples": o.examples.as_ref().map(|ex| ex.iter().map(|e| json!({"value": e.value, "help": e.help})).collect::<Vec<_>>()),
+            })
+        })
+        .collect();
+    // "Where do I find this?": the page rclone's own help for the token
+    // option points to, if it names one.
+    let token_help = prov
+        .options
+        .iter()
+        .find(|o| o.name == "access_token")
+        .and_then(|o| o.help.split_whitespace().find(|w| w.starts_with("https://")))
+        .map(|u| u.trim_end_matches(['.', ',', ')', '"']).to_string());
+    json!({
+        "type": prov.name,
+        "name": synclone_core::engine::drives::service_name(&prov.name),
+        "description": prov.description,
+        "auth": auth,
+        "token_option": if auth == "token" { Some("access_token") } else { None },
+        "token_help_url": token_help,
+        "options": options,
+    })
 }

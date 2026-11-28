@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Every Synclone window: the app's own commands and events, nothing else",
+  "windows": ["*"],
+  "permissions": ["core:default"]
+}

@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Add cloud storage</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+  <!-- Step 1: pick a service -->
+  <section id="step-pick">
+    <h1>Add cloud storage</h1>
+    <p class="lead">Pick the service where your files are.</p>
+    <div class="tiles">
+      <button class="tile" data-type="drive">Google Drive<small>Sign in with your browser</small></button>
+      <button class="tile" data-type="onedrive">OneDrive<small>Sign in with your browser</small></button>
+      <button class="tile" data-type="drime">Drime<small>Paste an access token</small></button>
+      <button class="tile" id="other-tile">Other services<small>Dropbox, Box, pCloud and more</small></button>
+    </div>
+  </section>
+
+  <!-- Step 1b: every other service -->
+  <section id="step-other" class="hidden">
+    <h1>Other cloud storage</h1>
+    <p class="lead">Search for your service.</p>
+    <input type="search" id="search" placeholder="Search services" autocomplete="off">
+    <div class="list" id="services"><div class="empty">Loading…</div></div>
+    <div class="actions"><button id="other-back" class="left">Back</button></div>
+  </section>
+
+  <!-- Step 2: sign in -->
+  <section id="step-signin" class="hidden">
+    <h1 id="signin-title">Sign in</h1>
+    <p class="lead" id="signin-lead"></p>
+
+    <div id="browser-box" class="hidden">
+      <p>Your browser opens the sign-in page. Sign in there and allow access, then come back here.</p>
+      <div id="waiting" class="hidden">
+        <p class="muted">Waiting for you to finish signing in…</p>
+        <p><a id="signin-again">Open the sign-in page again</a></p>
+      </div>
+    </div>
+
+    <div id="token-box" class="hidden">
+      <label for="token">Access token</label>
+      <input type="password" id="token" autocomplete="off" spellcheck="false">
+      <div class="hint">Create one in the service's web settings and paste it here.
+        <a id="token-help" class="hidden">Where do I find this?</a></div>
+    </div>
+
+    <div id="form-box"></div>
+    <details id="advanced-box" class="hidden">
+      <summary>Advanced</summary>
+      <div id="advanced"></div>
+    </details>
+
+    <div class="note rclone-terms">What does this do? Synclone saves these settings as an rclone remote in your
+      rclone configuration file, so the rclone command line can use this cloud storage too.</div>
+
+    <div id="signin-error" class="error hidden"></div>
+    <div class="actions">
+      <button id="signin-back" class="left">Back</button>
+      <button id="signin-cancel" class="hidden">Cancel</button>
+      <button id="signin" class="primary hidden">Sign in with your browser</button>
+      <button id="connect" class="primary hidden">Connect</button>
+    </div>
+  </section>
+
+  <!-- Step 3: name it -->
+  <section id="step-name" class="hidden">
+    <h1>Name this cloud drive</h1>
+    <p class="lead">It appears as a folder with this name in your Synclone folder.</p>
+    <label for="name">Name</label>
+    <input type="text" id="name" autocomplete="off">
+    <div id="name-error" class="error hidden"></div>
+    <div class="actions"><button id="finish" class="primary">Finish</button></div>
+  </section>
+
+  <!-- Step 4: done -->
+  <section id="step-done" class="hidden">
+    <h1>All set</h1>
+    <p class="lead" id="done-text"></p>
+    <p class="muted">Files show up right away and download when you open them. Right-click a file or folder
+      and choose "Always keep on this device" to keep it, or "Free up space" to remove it from this
+      computer. Nothing is deleted from the cloud unless you empty Synclone's trash.</p>
+    <div class="actions">
+      <button id="add-another" class="left">Add another</button>
+      <button id="done-folder">Open folder</button>
+      <button id="done-close" class="primary">Close</button>
+    </div>
+  </section>
+</main>
+<script src="common.js"></script>
+<script src="wizard.js"></script>
+</body>
+</html>

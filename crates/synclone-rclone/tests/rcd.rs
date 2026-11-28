@@ -294,3 +294,50 @@ async fn oauth_flow_starts_browser_server_and_can_be_cancelled() {
     assert!(c.list_remotes().await.unwrap().is_empty(), "half-made remote removed");
     d.shutdown().await;
 }
+
+/// Hydration on Windows streams objects through `--rc-serve` with Range
+/// requests (D-003, D-021): whole reads, reads from an offset, names that
+/// need percent-encoding, and a clean error for a missing object.
+#[tokio::test]
+async fn open_read_streams_objects_with_ranges() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = start(&dir).await;
+    let c = d.client();
+    let data = dir.path().join("data");
+    std::fs::create_dir_all(data.join("a dir")).unwrap();
+    let body: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
+    std::fs::write(data.join("a dir/f #1 [x] ü%.bin"), &body).unwrap();
+    let mut p = Map::new();
+    p.insert("remote".into(), Value::String(data.display().to_string()));
+    let opts = ConfigOpts {
+        non_interactive: true,
+        ..Default::default()
+    };
+    c.config_create("loc", "alias", p, &opts).await.unwrap();
+
+    async fn read_all(mut r: client::ObjectReader) -> Vec<u8> {
+        let mut out = Vec::new();
+        while let Some(b) = r.chunk().await.unwrap() {
+            out.extend_from_slice(&b);
+        }
+        out
+    }
+    let name = "a dir/f #1 [x] ü%.bin";
+    let r = c.open_read("loc:", name, 0).await.unwrap();
+    assert_eq!(r.total, body.len() as u64);
+    assert!(r.last_modified.is_some());
+    assert_eq!(read_all(r).await, body);
+
+    let r = c.open_read("loc:", name, 123_457).await.unwrap();
+    assert_eq!(r.total, body.len() as u64);
+    assert_eq!(r.offset, 123_457);
+    assert_eq!(read_all(r).await, &body[123_457..]);
+
+    let e = c
+        .open_read("loc:", "a dir/missing", 0)
+        .await
+        .err()
+        .expect("missing object fails");
+    assert_eq!(e.kind, ErrorKind::NotFound, "{e}");
+    d.shutdown().await;
+}

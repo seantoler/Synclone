@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Settings</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+  <h1>Settings</h1>
+
+  <h2>General</h2>
+  <label><input type="checkbox" id="autostart"> Start Synclone when I sign in to this computer</label>
+
+  <h2>Checking for changes</h2>
+  <label for="poll">Check each cloud for changes every (minutes)</label>
+  <input type="number" id="poll" min="1" max="1440">
+  <div class="hint">Changes you make on this computer upload within seconds. Opening a folder also checks it.</div>
+
+  <h2>Speed</h2>
+  <label for="bw">Bandwidth limit</label>
+  <input type="text" id="bw" placeholder="off">
+  <div class="hint">For example 2M for 2 MB/s, or 1M:4M for 1 MB/s up and 4 MB/s down. Leave empty for no limit.</div>
+
+  <h2>Files that never upload</h2>
+  <label for="ignore">Your own patterns, one per line</label>
+  <textarea id="ignore" rows="4" spellcheck="false" placeholder="*.bak"></textarea>
+  <div class="hint">Always skipped: <span id="builtin"></span>. Changes apply after Synclone restarts.</div>
+
+  <h2>Where your cloud drives are</h2>
+  <p id="root" class="muted"></p>
+
+  <div id="error" class="error hidden"></div>
+  <div id="saved" class="ok hidden">Saved.</div>
+  <div class="actions">
+    <button id="open-root" class="left">Open the Synclone folder</button>
+    <button id="save" class="primary">Save</button>
+  </div>
+</main>
+<script src="common.js"></script>
+<script>
+let current = null;
+async function load() {
+  try {
+    current = await rpc('settings.get');
+    $('poll').value = current.poll_minutes;
+    $('bw').value = current.bandwidth_limit === 'off' ? '' : current.bandwidth_limit;
+    $('ignore').value = (current.ignore || []).join('\n');
+    $('builtin').textContent = current.builtin_ignore.join('  ');
+    $('root').textContent = current.sync_root;
+    $('autostart').checked = await invoke('autostart_get');
+  } catch (e) {
+    $('error').textContent = errorText(e);
+    show('error', true);
+  }
+}
+$('save').onclick = async () => {
+  show('error', false);
+  show('saved', false);
+  try {
+    await rpc('settings.set', {
+      poll_minutes: Number($('poll').value) || 5,
+      bandwidth_limit: $('bw').value.trim(),
+      ignore: $('ignore').value.split('\n'),
+    });
+    await invoke('autostart_set', { on: $('autostart').checked });
+    show('saved', true);
+    await load();
+  } catch (e) {
+    $('error').textContent = errorText(e);
+    show('error', true);
+  }
+};
+$('open-root').onclick = () => invoke('open_path', { path: current.sync_root });
+load();
+</script>
+</body>
+</html>

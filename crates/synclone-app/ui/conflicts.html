@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Conflicts</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+  <h1>Conflicts</h1>
+  <p class="lead">These files changed on this computer and in the cloud at the same time. Synclone kept both: the
+    cloud's version has the original name, and your version was saved next to it as a conflict copy.</p>
+  <table>
+    <thead><tr><th>File</th><th>Your version saved as</th><th>Cloud drive</th><th>When</th><th></th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+  <div id="empty" class="empty hidden">No conflicts.</div>
+  <div id="error" class="error hidden"></div>
+</main>
+<script src="common.js"></script>
+<script>
+async function load() {
+  let list = [];
+  try {
+    list = await rpc('conflicts.list');
+  } catch (e) {
+    $('error').textContent = errorText(e);
+    show('error', true);
+    return;
+  }
+  $('rows').replaceChildren(
+    ...list.map((c) =>
+      el('tr', {},
+        el('td', { text: c.path }),
+        el('td', { text: c.conflict_copy_path }),
+        el('td', { text: c.drive || '' }),
+        el('td', { text: when(c.detected_at) }),
+        el('td', {},
+          el('button', { onclick: () => invoke('reveal_path', { path: c.copy_local_path }), text: 'Show in folder' }),
+          ' ',
+          el('button', { onclick: async () => { await rpc('conflicts.resolve', { id: c.id }); load(); }, text: 'Done' })
+        )
+      )
+    )
+  );
+  show('empty', list.length === 0);
+}
+load();
+setInterval(load, 5000);
+</script>
+</body>
+</html>

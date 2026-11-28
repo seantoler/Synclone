@@ -1,0 +1,95 @@
+name: Property test (random seeds)
+
+# Fresh random seeds for the sync engine's property test, every night and on
+# demand. Not a pull-request check, so a failure here never blocks a merge.
+# It files (or updates) one issue with the seed and the shrunk case; add the
+# case to REGRESSIONS in crates/synclone-provider-stub/tests/property.rs when
+# fixing it (D-028).
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      cases:
+        description: "Cases per OS"
+        default: "30000"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  random:
+    name: random seed (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Property test, fresh seed
+        shell: bash
+        env:
+          SYNCLONE_PROPTEST_SEED: random
+          PROPTEST_CASES: ${{ inputs.cases || '30000' }}
+          SYNCLONE_PROPTEST_REPORT: ${{ runner.temp }}/property-report.txt
+        run: cargo test --release -p synclone-provider-stub --test property no_content_is_ever_lost -- --nocapture
+      - name: Keep the report and the new regression seed
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: property-failure-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/property-report.txt
+            crates/synclone-provider-stub/tests/property.proptest-regressions
+          if-no-files-found: ignore
+
+  report:
+    name: report failures
+    needs: random
+    if: failure()
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      actions: read
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: property-failure-*
+          path: reports
+      - name: Open or update the tracking issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        shell: bash
+        run: |
+          title="Nightly property test found a failing case"
+          {
+            echo "Run: $RUN_URL ($(date -u +%Y-%m-%d))"
+            echo
+            for f in reports/*/property-report.txt; do
+              [ -f "$f" ] || continue
+              echo "### $(basename "$(dirname "$f")" | sed 's/^property-failure-//')"
+              echo '```'
+              # The shrunk case is at the end; keep the comment readable.
+              head -c 6000 "$f"
+              echo '```'
+            done
+            echo
+            echo "Replay locally with the line above, then add the shrunk case to REGRESSIONS in crates/synclone-provider-stub/tests/property.rs."
+          } > body.md
+          n=$(gh issue list --state open --search "\"$title\" in:title" --json number --jq '.[0].number // empty')
+          if [ -n "$n" ]; then
+            gh issue comment "$n" --body-file body.md
+          else
+            gh issue create --title "$title" --body-file body.md
+          fi

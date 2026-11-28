@@ -40,6 +40,15 @@ pub enum ProviderEvent {
         drive: DriveId,
         path: RelPath,
     },
+    /// The OS filled a placeholder itself (Windows streams the content when
+    /// a program opens it). `size` / `mtime_ns` describe the version the
+    /// placeholder stood for, as it is now on disk.
+    Hydrated {
+        drive: DriveId,
+        path: RelPath,
+        size: i64,
+        mtime_ns: i64,
+    },
     /// "Save to device" / "Always keep on this device".
     PinRequested {
         drive: DriveId,

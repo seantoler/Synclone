@@ -191,6 +191,12 @@ impl Engine {
                 self.db
                     .enqueue_op("hydrate", drive, &path, &serde_json::json!({}), self.now())?;
             }
+            E::Hydrated {
+                drive,
+                path,
+                size,
+                mtime_ns,
+            } => self.on_hydrated(drive, &path, LocalFingerprint { size, mtime_ns })?,
             E::PinRequested { drive, path, recursive } => {
                 self.db.enqueue_op(
                     "pin",
@@ -232,11 +238,45 @@ impl Engine {
                         .enqueue_op("list", drive, &path, &serde_json::json!({}), self.now())?;
                 }
             }
-            E::DriveRootRemoved { drive } => self.drive_root_removed(drive)?,
+            E::DriveRootRemoved { drive } => self.drive_folder_missing(drive)?,
             E::DriveRootRenamed { drive, new_name } => {
                 self.rename_drive(drive, &new_name)?;
             }
         }
+        Ok(())
+    }
+
+    /// The OS hydrated a placeholder on its own (D-021). If the file on disk
+    /// is still exactly what the placeholder described, and that is the
+    /// cloud version on record, it is now a downloaded copy of that version.
+    /// Anything else is left to a normal reconcile, which re-derives it.
+    fn on_hydrated(&self, drive: DriveId, p: &RelPath, served: LocalFingerprint) -> Result<()> {
+        let d = self.drive(drive)?;
+        let local = self.provider.local_status(&d, p)?;
+        let item = self.db.item(drive, p)?;
+        let matches = match (&item, local) {
+            (Some(it), LocalStatus::File(fp)) => {
+                fp == served
+                    && it.local_state == LocalState::Placeholder
+                    && it.remote.as_ref().map(|r| r.size == fp.size).unwrap_or(false)
+            }
+            _ => false,
+        };
+        if !matches {
+            return self.enqueue_reconcile(drive, p, 0);
+        }
+        let mut it = item.expect("checked above");
+        it.synced = it.remote.clone();
+        it.local_base = Some(served);
+        it.local_state = LocalState::Downloaded;
+        it.dirty = false;
+        self.db.upsert_item(&it)?;
+        // Downloads stay: keep it from being freed automatically.
+        self.provider.set_state(&d, p, LocalState::Downloaded)?;
+        // A "hydrate" op queued for the same open is now done.
+        self.db.cancel_ops(drive, "hydrate", p)?;
+        self.db
+            .log_activity(Some(drive), Some(p), "download", &format!("Downloaded {p}"), false);
         Ok(())
     }
 
@@ -249,7 +289,7 @@ impl Engine {
         }
         if self.provider.local_status(&d, &RelPath::root())? == LocalStatus::Absent {
             // The whole folder is gone: that is a disconnect, never a mass delete.
-            self.drive_root_removed(drive_id)?;
+            self.drive_folder_missing(drive_id)?;
             return Ok(0);
         }
         let entries = self.provider.scan(&d)?;
@@ -323,6 +363,17 @@ impl Engine {
             .any(|a| !a.is_root() && self.ignore.is_ignored(a.name()))
         {
             return Ok(Outcome::Done);
+        }
+        // The drive's whole folder is gone: that is a disconnect, never a
+        // pile of deletes (the OS may report each child before the folder).
+        if self.provider.local_status(d, &RelPath::root())? == LocalStatus::Absent {
+            self.drive_folder_missing(d.id)?;
+            // Wait for that check: either the drive is disconnected (and this
+            // op dropped) or the folder is back under its current name.
+            return Ok(Outcome::Defer {
+                ms: crate::engine::drives::ROOT_CHECK_DELAY_MS + 500,
+                why: "the drive's folder is missing".into(),
+            });
         }
         let item = self.db.item(d.id, p)?;
         if item.as_ref().map(|i| i.unsyncable.is_some()).unwrap_or(false) {
@@ -1173,6 +1224,17 @@ impl Engine {
         if src != LocalStatus::Absent && dst == LocalStatus::Absent {
             self.provider.rename_local(d, from, to)?;
             return Ok(());
+        }
+        if src != LocalStatus::Absent {
+            // The local item stays at `from`. Nothing else may queue it: when
+            // a pending local move is dropped (rule 11), its event is spent
+            // (found by the property test on macOS CI).
+            self.enqueue_reconcile(d.id, from, 0)?;
+            for c in self.db.subtree(d.id, from)? {
+                if !c.is_dir && c.local_state != LocalState::Placeholder {
+                    self.enqueue_reconcile(d.id, &c.path, 0)?;
+                }
+            }
         }
         let mut rows = self.db.subtree(d.id, to)?;
         if let Some(it) = self.db.item(d.id, to)? {

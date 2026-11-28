@@ -56,7 +56,7 @@ pub async fn call_on<S>(
     stream: S,
     method: &str,
     params: Value,
-    on_event: &mut dyn FnMut(&Value),
+    on_event: &mut (dyn FnMut(&Value) + Send),
 ) -> anyhow::Result<Value>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -101,7 +101,12 @@ pub fn default_pipe_name() -> String {
 }
 
 /// Connect to the daemon at `addr` (socket path or pipe name) and call.
-pub async fn call(addr: &str, method: &str, params: Value, on_event: &mut dyn FnMut(&Value)) -> anyhow::Result<Value> {
+pub async fn call(
+    addr: &str,
+    method: &str,
+    params: Value,
+    on_event: &mut (dyn FnMut(&Value) + Send),
+) -> anyhow::Result<Value> {
     #[cfg(unix)]
     {
         let s = tokio::net::UnixStream::connect(addr).await.map_err(|e| {

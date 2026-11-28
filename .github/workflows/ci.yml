@@ -35,6 +35,11 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Tests (layers 1-2)
+        # The property test runs its fixed seeds and the saved cases here, so
+        # a pull request sees the same cases every time. Fresh random seeds
+        # run in property-nightly.yml, which never blocks a merge (D-028).
+        env:
+          SYNCLONE_PROPTEST_SEED: fixed
         run: cargo test --workspace -- --nocapture
       - name: synclonectl --version
         run: cargo run -q -p synclone-cli -- --version

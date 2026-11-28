@@ -129,6 +129,103 @@ impl RcClient {
     pub async fn quit(&self) -> Result<()> {
         self.call("core/quit", json!({})).await.map(|_| ())
     }
+
+    /// The `--rc-serve` URL of an object: `/[fs]/path/inside`, each segment
+    /// percent-encoded. `fs` must be a remote root such as `"gdrive:"`.
+    pub fn serve_url(&self, fs: &str, remote: &str) -> reqwest::Url {
+        let mut url = reqwest::Url::parse(&self.endpoint.url).expect("the rc endpoint is a valid URL");
+        {
+            let mut segs = url.path_segments_mut().expect("http URLs have path segments");
+            segs.clear();
+            segs.push(&format!("[{fs}]"));
+            for s in remote.split('/').filter(|s| !s.is_empty()) {
+                segs.push(s);
+            }
+        }
+        url
+    }
+
+    /// Open an object for streaming from byte `offset` (an HTTP Range read
+    /// through `--rc-serve`, verified in D-003). There is no overall
+    /// timeout: callers read the body in chunks for as long as it takes.
+    pub async fn open_read(&self, fs: &str, remote: &str, offset: u64) -> Result<ObjectReader> {
+        let what = "rc-serve";
+        let url = self.serve_url(fs, remote);
+        let mut req = self
+            .http
+            .get(url)
+            .basic_auth(&self.endpoint.user, Some(&self.endpoint.pass));
+        if offset > 0 {
+            req = req.header(reqwest::header::RANGE, format!("bytes={offset}-"));
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| RcloneError::new(ErrorKind::Network, what, e.to_string()))?;
+        let status = resp.status().as_u16();
+        if !(200..300).contains(&status) {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(RcloneError::from_response(what, status, text.trim()));
+        }
+        let headers = resp.headers();
+        let header = |name: reqwest::header::HeaderName| headers.get(name).and_then(|v| v.to_str().ok());
+        // A 206 says where it starts and the whole size; a 200 is the whole object.
+        let (start, total) = if status == 206 {
+            let cr = header(reqwest::header::CONTENT_RANGE).unwrap_or_default();
+            parse_content_range(cr)
+                .ok_or_else(|| RcloneError::new(ErrorKind::Other, what, format!("unexpected Content-Range {cr:?}")))?
+        } else {
+            (0, resp.content_length().unwrap_or(0))
+        };
+        if start != offset {
+            return Err(RcloneError::new(
+                ErrorKind::Other,
+                what,
+                format!("asked for bytes from {offset}, got bytes from {start}"),
+            ));
+        }
+        let last_modified = header(reqwest::header::LAST_MODIFIED).map(str::to_string);
+        Ok(ObjectReader {
+            resp,
+            total,
+            offset,
+            last_modified,
+        })
+    }
+}
+
+/// An object being read through `--rc-serve`.
+pub struct ObjectReader {
+    resp: reqwest::Response,
+    /// Size of the whole object.
+    pub total: u64,
+    /// Where the next chunk starts.
+    pub offset: u64,
+    /// The `Last-Modified` header as sent.
+    pub last_modified: Option<String>,
+}
+
+impl ObjectReader {
+    /// The next piece of the body, or `None` at the end.
+    pub async fn chunk(&mut self) -> Result<Option<bytes::Bytes>> {
+        let c = self
+            .resp
+            .chunk()
+            .await
+            .map_err(|e| RcloneError::new(ErrorKind::Network, "rc-serve", e.to_string()))?;
+        if let Some(b) = &c {
+            self.offset += b.len() as u64;
+        }
+        Ok(c)
+    }
+}
+
+/// `bytes 10-19/100000` → (10, 100000).
+fn parse_content_range(s: &str) -> Option<(u64, u64)> {
+    let rest = s.trim().strip_prefix("bytes ")?;
+    let (range, total) = rest.split_once('/')?;
+    let (start, _) = range.split_once('-')?;
+    Some((start.trim().parse().ok()?, total.trim().parse().ok()?))
 }
 
 fn decode<T: serde::de::DeserializeOwned>(path: &str, v: Value) -> Result<T> {

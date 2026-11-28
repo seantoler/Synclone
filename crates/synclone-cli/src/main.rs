@@ -300,7 +300,7 @@ async fn main() -> Result<()> {
         Cmd::Status => ("status", json!({})),
         Cmd::Drive(d) => match d {
             DriveCmd::List => ("drive.list", json!({})),
-            DriveCmd::Services => ("drive.services", json!({})),
+            DriveCmd::Services => ("drive.services", json!({"advanced": true})),
             DriveCmd::Add { kind, name, params } => {
                 let mut m = Map::new();
                 for kv in params {

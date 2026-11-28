@@ -503,3 +503,169 @@ async fn local_move_whose_source_was_replaced_by_a_cloud_rename_keeps_both() {
     );
     assert!(contents.contains(&b"my new file".to_vec()), "new file uploaded");
 }
+
+// ---------------------------------------------------------------- OS-driven hydration (D-021)
+
+/// Windows fills a placeholder itself when a program opens it. The engine
+/// records that as a downloaded copy of the version on record, without
+/// transferring anything again, and later cloud changes follow rule 2.
+#[tokio::test]
+async fn os_hydration_is_recorded_as_a_download() {
+    let h = harness().await;
+    h.put("doc.txt", b"v1");
+    h.sync().await;
+    assert!(h.is_placeholder("doc.txt"));
+    // What the OS does: the placeholder now has its content.
+    std::fs::remove_file(format!(
+        "{}{}",
+        h.local("doc.txt").display(),
+        synclone_provider_stub::STUB_EXT
+    ))
+    .unwrap();
+    std::fs::write(h.local("doc.txt"), b"v1").unwrap();
+    let LocalStatus::File(fp) = h.status("doc.txt") else {
+        panic!("hydrated")
+    };
+    h.mock.clear_calls();
+    h.eng
+        .handle_event(ProviderEvent::Hydrated {
+            drive: h.d.id,
+            path: rp("doc.txt"),
+            size: fp.size,
+            mtime_ns: fp.mtime_ns,
+        })
+        .unwrap();
+    h.eng.run_until_idle(true, 20).await.unwrap();
+    let it = h.item("doc.txt").unwrap();
+    assert_eq!(it.local_state, LocalState::Downloaded);
+    assert_eq!(it.local_base, Some(fp));
+    assert!(it.synced.is_some());
+    assert_eq!(h.mock.count("operations/copyfile"), 0, "nothing transferred again");
+    assert_eq!(h.mock.remote_write_calls(), 0);
+    // Rule 2 now applies: a cloud edit replaces the clean local copy.
+    h.put("doc.txt", b"version 2");
+    h.sync().await;
+    assert_eq!(h.read_local("doc.txt").unwrap(), b"version 2");
+    assert!(h.conflict_copies("").is_empty());
+}
+
+/// If the file on disk is not what the placeholder described (written to
+/// right after it was filled), nothing is assumed: a normal reconcile
+/// decides, and no version is lost.
+#[tokio::test]
+async fn os_hydration_with_a_different_file_is_reconciled_normally() {
+    let h = harness().await;
+    h.put("doc.txt", b"v1");
+    h.sync().await;
+    std::fs::remove_file(format!(
+        "{}{}",
+        h.local("doc.txt").display(),
+        synclone_provider_stub::STUB_EXT
+    ))
+    .unwrap();
+    h.write_local("doc.txt", b"edited right away");
+    h.eng
+        .handle_event(ProviderEvent::Hydrated {
+            drive: h.d.id,
+            path: rp("doc.txt"),
+            size: 2,
+            mtime_ns: 1,
+        })
+        .unwrap();
+    h.eng.run_until_idle(true, 20).await.unwrap();
+    // Both versions survive (rule 9 keeps both when it cannot tell).
+    let mut versions = vec![h.remote("doc.txt").unwrap()];
+    for c in h.remote_conflict_copies() {
+        versions.push(h.remote(&c).unwrap());
+    }
+    assert!(versions.contains(&b"v1".to_vec()), "{versions:?}");
+    assert!(versions.contains(&b"edited right away".to_vec()), "{versions:?}");
+}
+
+/// The OS may report every child of a deleted drive folder as deleted
+/// before the folder itself goes. That is still a disconnect: nothing goes
+/// into the trash queue and nothing is sent to the cloud.
+#[tokio::test]
+async fn child_deletes_reported_with_the_drive_folder_gone_are_a_disconnect() {
+    let h = harness().await;
+    h.put("a.txt", b"a");
+    h.put("dir/b.txt", b"b");
+    h.sync().await;
+    h.open("a.txt").await;
+    h.mock.clear_calls();
+    std::fs::remove_dir_all(h.stub.drive_dir(&h.d)).unwrap();
+    for p in ["a.txt", "dir/b.txt", "dir"] {
+        h.eng
+            .handle_event(ProviderEvent::LocalDeleted {
+                drive: h.d.id,
+                path: rp(p),
+            })
+            .unwrap();
+    }
+    h.clock.advance(10_000);
+    h.eng.run_until_idle(true, 20).await.unwrap();
+    assert!(h.eng.trash_list().unwrap().is_empty());
+    assert_eq!(h.eng.drive(h.d.id).unwrap().state, DriveState::Disconnected);
+    assert_eq!(h.mock.remote_write_calls(), 0, "calls: {:?}", h.mock.calls());
+    assert_eq!(h.remote("a.txt").unwrap(), b"a");
+}
+
+/// Windows reports a rename both as a rename and, through its watcher, as a
+/// change at the old name. Run in the same batch as the move, a reconcile of
+/// the old name must not take the renamed item for a delete.
+#[tokio::test]
+async fn rename_reported_together_with_a_change_at_the_old_name_is_not_a_delete() {
+    let h = harness().await;
+    h.put("a/one.txt", b"one");
+    h.sync().await;
+    std::fs::rename(
+        format!("{}{}", h.local("a/one.txt").display(), synclone_provider_stub::STUB_EXT),
+        format!("{}{}", h.local("a/uno.txt").display(), synclone_provider_stub::STUB_EXT),
+    )
+    .unwrap();
+    for ev in [
+        ProviderEvent::LocalRenamed {
+            drive: h.d.id,
+            from: rp("a/one.txt"),
+            to: rp("a/uno.txt"),
+        },
+        ProviderEvent::LocalModified {
+            drive: h.d.id,
+            path: rp("a/one.txt"),
+        },
+        ProviderEvent::LocalModified {
+            drive: h.d.id,
+            path: rp("a/uno.txt"),
+        },
+    ] {
+        h.eng.handle_event(ev).unwrap();
+    }
+    h.mock.set_latency(30);
+    h.clock.advance(10_000);
+    h.eng.run_until_idle(false, 20).await.unwrap();
+    assert!(h.eng.trash_list().unwrap().is_empty(), "{:?}", h.eng.trash_list());
+    assert_eq!(h.remote("a/uno.txt").unwrap(), b"one");
+    assert!(h.remote("a/one.txt").is_none());
+}
+
+/// Renaming a drive updates its name and its folder one after the other. A
+/// scan in between sees no folder under one of the names; that must not
+/// disconnect the drive (D-027).
+#[tokio::test]
+async fn a_scan_during_a_drive_rename_does_not_disconnect_it() {
+    let h = harness().await;
+    h.put("a.txt", b"a");
+    h.sync().await;
+    let old_dir = h.stub.drive_dir(&h.d);
+    let renamed = h.eng.rename_drive(h.d.id, "Renamed").unwrap();
+    // The scan lands before the folder is renamed.
+    h.eng.scan_drive(h.d.id).unwrap();
+    std::fs::rename(&old_dir, h.stub.drive_dir(&renamed)).unwrap();
+    h.clock.advance(10_000);
+    h.eng.run_until_idle(true, 20).await.unwrap();
+    let d = h.eng.drive(h.d.id).unwrap();
+    assert_eq!(d.state, DriveState::Connected);
+    assert_eq!(d.display_name, "Renamed");
+    assert!(h.stub.drive_dir(&d).join("a.txt.sclstub").exists());
+    assert!(h.eng.trash_list().unwrap().is_empty());
+}
