@@ -1,0 +1,4 @@
+body{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;max-width:42rem;margin:3rem auto;padding:0 1.25rem;line-height:1.6;color:#1b1f24;background:#fff}
+h1{font-size:1.9rem;margin-bottom:.25rem}h2{font-size:1.15rem;margin-top:2rem}
+a{color:#0b5cad}footer{margin-top:3rem;font-size:.9rem;color:#57606a}
+@media(prefers-color-scheme:dark){body{color:#e6edf3;background:#0d1117}a{color:#6cb6ff}footer{color:#8b949e}}
