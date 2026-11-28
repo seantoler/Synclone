@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use anyhow::{anyhow, bail, Context, Result};
-use synclone_core::provider::{LocalEntry, NameRules, Provider, ProviderEvent};
+use synclone_core::provider::{DeletedCopy, LocalEntry, NameRules, Provider, ProviderEvent};
 use synclone_core::*;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
@@ -25,6 +25,10 @@ pub struct StubProvider {
     tx: UnboundedSender<ProviderEvent>,
     rx: Mutex<Option<UnboundedReceiver<ProviderEvent>>>,
     seq: AtomicU64,
+    /// What went to the recycle folder, and from where (original, copy).
+    recycled: Mutex<Vec<(PathBuf, PathBuf)>>,
+    /// Folders a test says are open, as Explorer windows would be.
+    open_folders: Mutex<Vec<(DriveId, RelPath)>>,
 }
 
 pub fn fingerprint(meta: &std::fs::Metadata) -> LocalFingerprint {
@@ -55,6 +59,8 @@ impl StubProvider {
             tx,
             rx: Mutex::new(Some(rx)),
             seq: AtomicU64::new(0),
+            recycled: Mutex::new(Vec::new()),
+            open_folders: Mutex::new(Vec::new()),
         }
     }
 
@@ -105,6 +111,22 @@ impl StubProvider {
         let _ = self.tx.send(ev);
     }
 
+    /// The user deletes `p` to the recycle folder (Explorer's Delete key),
+    /// and the OS reports it.
+    pub fn user_recycle(&self, d: &Drive, p: &RelPath) -> Result<()> {
+        self.to_recycle(&self.path_of(d, p))?;
+        self.emit(ProviderEvent::LocalDeleted {
+            drive: d.id,
+            path: p.clone(),
+        });
+        Ok(())
+    }
+
+    /// Say which folders are "open in Explorer" (tests of hot polling).
+    pub fn set_open_folders(&self, folders: Vec<(DriveId, RelPath)>) {
+        *self.open_folders.lock().unwrap() = folders;
+    }
+
     fn to_recycle(&self, path: &Path) -> Result<()> {
         let name = path
             .file_name()
@@ -123,6 +145,7 @@ impl StubProvider {
                 std::fs::remove_file(path)?;
             }
         }
+        self.recycled.lock().unwrap().push((path.to_path_buf(), dest));
         Ok(())
     }
 
@@ -271,7 +294,10 @@ impl Provider for StubProvider {
         let now = self.local_status(drive, path)?;
         let ok = match (expected, now) {
             (LocalStatus::File(a), LocalStatus::File(b)) => a == b,
-            (LocalStatus::Placeholder | LocalStatus::Absent, LocalStatus::Placeholder | LocalStatus::Absent) => true,
+            // A placeholder that vanished meanwhile was deleted by the user:
+            // the download must not bring it back.
+            (LocalStatus::Placeholder, LocalStatus::Placeholder) => true,
+            (LocalStatus::Absent, LocalStatus::Placeholder | LocalStatus::Absent) => true,
             _ => false,
         };
         if !ok {
@@ -335,6 +361,43 @@ impl Provider for StubProvider {
 
     fn name_rules(&self) -> NameRules {
         self.rules
+    }
+
+    fn open_folders(&self, drive: &Drive) -> Vec<RelPath> {
+        self.open_folders
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(d, _)| *d == drive.id)
+            .map(|(_, p)| p.clone())
+            .collect()
+    }
+
+    fn find_deleted_copy(&self, d: &Drive, p: &RelPath, fp: &LocalFingerprint) -> Result<Option<DeletedCopy>> {
+        let original = self.path_of(d, p);
+        let g = self.recycled.lock().unwrap();
+        // The most recent matching copy.
+        for (from, copy) in g.iter().rev() {
+            if from == &original && copy.is_file() {
+                if let Ok(m) = std::fs::metadata(copy) {
+                    if &fingerprint(&m) == fp {
+                        return Ok(Some(DeletedCopy {
+                            content: copy.clone(),
+                            record: None,
+                        }));
+                    }
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    fn take_deleted_copy(&self, copy: &DeletedCopy, to: &Path) -> Result<()> {
+        std::fs::rename(&copy.content, to)
+            .or_else(|_| std::fs::copy(&copy.content, to).and_then(|_| std::fs::remove_file(&copy.content)))
+            .with_context(|| format!("taking {} back", copy.content.display()))?;
+        self.recycled.lock().unwrap().retain(|(_, c)| c != &copy.content);
+        Ok(())
     }
 
     fn take_events(&self) -> Option<UnboundedReceiver<ProviderEvent>> {

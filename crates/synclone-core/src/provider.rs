@@ -148,4 +148,39 @@ pub trait Provider: Send + Sync {
     fn name_rules(&self) -> NameRules;
     /// The OS event stream; taken once by the daemon.
     fn take_events(&self) -> Option<tokio::sync::mpsc::UnboundedReceiver<ProviderEvent>>;
+
+    /// Folders of this drive the user has open right now (Windows: open
+    /// Explorer windows). The engine checks them for cloud changes more
+    /// often (D-031).
+    fn open_folders(&self, _drive: &Drive) -> Vec<RelPath> {
+        Vec::new()
+    }
+
+    /// The copy of `path` the OS kept when the user deleted it (Windows:
+    /// the Recycle Bin), if one is still there with exactly the size and
+    /// modification time `fp`. Changes nothing (D-032).
+    fn find_deleted_copy(
+        &self,
+        _drive: &Drive,
+        _path: &RelPath,
+        _fp: &LocalFingerprint,
+    ) -> ProviderResult<Option<DeletedCopy>> {
+        Ok(None)
+    }
+
+    /// Take a copy found by [`Provider::find_deleted_copy`] back out of the
+    /// OS's keeping: move its content to `to` (a staging file outside the
+    /// drive folder) and drop the OS's record of it.
+    fn take_deleted_copy(&self, _copy: &DeletedCopy, _to: &Path) -> ProviderResult<()> {
+        anyhow::bail!("this provider keeps no deleted copies")
+    }
+}
+
+/// A deleted file the OS still holds (see [`Provider::find_deleted_copy`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeletedCopy {
+    /// Where its content is now (readable in place).
+    pub content: PathBuf,
+    /// The OS's record of it (Windows: the `$I` file), removed when taken.
+    pub record: Option<PathBuf>,
 }

@@ -42,10 +42,10 @@ pub enum RemoteChange {
     Renamed { from: RelPath },
 }
 
-struct DirTask {
-    path: RelPath,
+pub(crate) struct DirTask {
+    pub(crate) path: RelPath,
     /// The folder or one above it is pinned ("save to device").
-    pinned: bool,
+    pub(crate) pinned: bool,
 }
 
 impl Engine {
@@ -68,7 +68,7 @@ impl Engine {
         RelPath::new(rel).filter(|r| !r.is_root())
     }
 
-    fn is_pinned_path(&self, d: DriveId, p: &RelPath) -> Result<bool> {
+    pub(crate) fn is_pinned_path(&self, d: DriveId, p: &RelPath) -> Result<bool> {
         if let Some(it) = self.db.item(d, p)? {
             if it.pinned {
                 return Ok(true);
@@ -149,7 +149,7 @@ impl Engine {
     /// List `task.path`, diff it against the DB, write the changes, and
     /// return its subfolders (with inherited pin state). Items missing from
     /// the listing are appended to `missing` (applied at the end).
-    async fn list_and_diff(
+    pub(crate) async fn list_and_diff(
         &self,
         drive: &Drive,
         task: &DirTask,
@@ -329,7 +329,7 @@ impl Engine {
     }
 
     /// Items missing from their folder's listing: deleted remotely.
-    async fn apply_missing(&self, drive: &Drive, missing: Vec<Item>, report: &mut PollReport) -> Result<()> {
+    pub(crate) async fn apply_missing(&self, drive: &Drive, missing: Vec<Item>, report: &mut PollReport) -> Result<()> {
         for m in missing {
             // Skip if it was renamed away or re-created meanwhile.
             let Some(cur) = self.db.item(drive.id, &m.path)? else {

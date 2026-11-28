@@ -16,7 +16,7 @@ use cloud_filter::root::{
     SyncRootInfo,
 };
 use synclone_core::db::Db;
-use synclone_core::provider::{LocalEntry, NameRules, Provider, ProviderEvent};
+use synclone_core::provider::{DeletedCopy, LocalEntry, NameRules, Provider, ProviderEvent};
 use synclone_core::*;
 use synclone_rclone::{Endpoint, RcClient};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
@@ -595,9 +595,10 @@ impl Provider for WindowsProvider {
             let now = self.local_status(drive, path)?;
             let ok = match (expected, now) {
                 (LocalStatus::File(a), LocalStatus::File(b)) => a == b,
-                (LocalStatus::Placeholder | LocalStatus::Absent, LocalStatus::Placeholder | LocalStatus::Absent) => {
-                    true
-                }
+                // A placeholder that vanished meanwhile was deleted by the
+                // user: the download must not bring it back.
+                (LocalStatus::Placeholder, LocalStatus::Placeholder) => true,
+                (LocalStatus::Absent, LocalStatus::Placeholder | LocalStatus::Absent) => true,
                 _ => false,
             };
             if !ok {
@@ -741,6 +742,56 @@ impl Provider for WindowsProvider {
 
     fn take_events(&self) -> Option<UnboundedReceiver<ProviderEvent>> {
         self.rx.lock().unwrap().take()
+    }
+
+    fn open_folders(&self, drive: &Drive) -> Vec<RelPath> {
+        let top = self.path_of(drive, &RelPath::root());
+        crate::explorer::open_folders()
+            .into_iter()
+            .filter(|p| crate::recycle_bin::is_under(p, &top))
+            .filter_map(|p| {
+                let s = p.display().to_string();
+                let rel = s
+                    .get(top.display().to_string().len()..)?
+                    .trim_start_matches('\\')
+                    .replace('\\', "/");
+                if rel.is_empty() {
+                    Some(RelPath::root())
+                } else {
+                    RelPath::new(&rel)
+                }
+            })
+            .collect()
+    }
+
+    fn find_deleted_copy(&self, d: &Drive, p: &RelPath, fp: &LocalFingerprint) -> Result<Option<DeletedCopy>> {
+        let original = self.path_of(d, p);
+        for e in crate::recycle_bin::find(&original)? {
+            let Ok(m) = std::fs::metadata(&e.content) else { continue };
+            if !m.is_file() {
+                continue;
+            }
+            let here = paths::fingerprint(&m);
+            // NTFS keeps 100 ns; the fingerprint on record came from NTFS too.
+            if here.size == fp.size && paths::ntfs_ns(here.mtime_ns) == paths::ntfs_ns(fp.mtime_ns) {
+                return Ok(Some(DeletedCopy {
+                    content: e.content,
+                    record: Some(e.info),
+                }));
+            }
+        }
+        Ok(None)
+    }
+
+    fn take_deleted_copy(&self, copy: &DeletedCopy, to: &Path) -> Result<()> {
+        let e = crate::recycle_bin::BinEntry {
+            original: PathBuf::new(),
+            size: 0,
+            deleted: 0,
+            info: copy.record.clone().ok_or_else(|| anyhow!("no Recycle Bin record"))?,
+            content: copy.content.clone(),
+        };
+        crate::recycle_bin::take(&e, to)
     }
 }
 

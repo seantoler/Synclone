@@ -27,7 +27,22 @@ pub async fn harness() -> H {
     harness_with(MockRclone::new(), None).await
 }
 
+pub fn default_settings() -> EngineSettings {
+    EngineSettings {
+        concurrency: 2,
+        ..Default::default()
+    }
+}
+
+pub async fn harness_with_settings(settings: EngineSettings) -> H {
+    harness_full(MockRclone::new(), None, settings).await
+}
+
 pub async fn harness_with(mock: MockRclone, db_path: Option<PathBuf>) -> H {
+    harness_full(mock, db_path, default_settings()).await
+}
+
+pub async fn harness_full(mock: MockRclone, db_path: Option<PathBuf>, settings: EngineSettings) -> H {
     let tmp = tempfile::tempdir().unwrap();
     mock.add_remote("r");
     let stub = Arc::new(StubProvider::new(
@@ -39,10 +54,6 @@ pub async fn harness_with(mock: MockRclone, db_path: Option<PathBuf>) -> H {
         None => Db::open(&tmp.path().join("state.db")).unwrap(),
     });
     let clock = Arc::new(TestClock::new(1_000_000));
-    let settings = EngineSettings {
-        concurrency: 2,
-        ..Default::default()
-    };
     let eng = Engine::new(
         db,
         Arc::new(mock.clone()) as Arc<dyn RcloneApi>,

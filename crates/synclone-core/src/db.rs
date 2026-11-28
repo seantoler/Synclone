@@ -175,6 +175,10 @@ pub struct TrashEntry {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct TrashSnapshot {
     pub items: Vec<(RelPath, RemoteMeta)>,
+    /// Files that were downloaded when deleted: their local (size, mtime)
+    /// at the last sync, so a restore can find the deleted copy (D-032).
+    #[serde(default)]
+    pub downloaded: Vec<(RelPath, LocalFingerprint)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -7,7 +7,7 @@ use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use synclone_rclone::ListOpts;
 
-use super::sync::Outcome;
+use super::sync::{Outcome, Want};
 use super::Engine;
 use crate::compare::remote_meta;
 use crate::db::{TrashEntry, TrashSnapshot};
@@ -34,6 +34,7 @@ impl Engine {
             return Ok(());
         }
         let mut items = Vec::new();
+        let mut downloaded = Vec::new();
         let mut size = 0;
         let subtree = if it.is_dir {
             self.db.subtree(d.id, &it.path)?
@@ -51,6 +52,11 @@ impl Engine {
                 }
                 items.push((r.path.clone(), m));
             }
+            if !r.is_dir && r.local_state == LocalState::Downloaded && r.synced.is_some() {
+                if let Some(fp) = r.local_base {
+                    downloaded.push((r.path.clone(), fp));
+                }
+            }
             r.local_state = LocalState::Trashed;
             self.db.upsert_item(&r)?;
         }
@@ -62,7 +68,7 @@ impl Engine {
             is_dir: it.is_dir,
             size,
             deleted_at: self.now(),
-            snapshot: TrashSnapshot { items },
+            snapshot: TrashSnapshot { items, downloaded },
             status: "pending".into(),
             note: None,
         })?;
@@ -127,7 +133,12 @@ impl Engine {
         })
     }
 
-    /// Put a trashed item back (as placeholders). No remote calls.
+    /// Put a trashed item back. No remote calls here: everything comes back
+    /// as placeholders at once. When the user restores (`note` is None),
+    /// files that were downloaded are queued to come back downloaded,
+    /// from the OS's deleted copy when it still matches, else from the
+    /// cloud (`recover` ops, D-032). Restores the engine makes itself (rule 8)
+    /// leave them as placeholders.
     pub fn restore_trash(&self, id: i64, note: Option<&str>) -> Result<()> {
         let t = self.db.trash_entry(id)?.ok_or_else(|| anyhow!("no trash entry {id}"))?;
         if t.status != "pending" {
@@ -153,6 +164,16 @@ impl Engine {
             if !r.is_dir && (r.pinned || self.pinned(d.id, &r.path)?) {
                 self.db
                     .enqueue_op("hydrate", d.id, &r.path, &serde_json::json!({}), self.now())?;
+            } else if note.is_none() {
+                if let Some((_, fp)) = t.snapshot.downloaded.iter().find(|(p, _)| p == &r.path) {
+                    self.db.enqueue_op(
+                        "recover",
+                        d.id,
+                        &r.path,
+                        &serde_json::json!({ "size": fp.size, "mtime_ns": fp.mtime_ns }),
+                        self.now(),
+                    )?;
+                }
             }
         }
         self.db
@@ -310,6 +331,108 @@ impl Engine {
             true,
         );
         Ok(report)
+    }
+
+    /// A restored file that was downloaded when it was deleted (D-032):
+    /// bring it back downloaded. If the cloud copy is unchanged since the
+    /// last sync and the OS still holds the deleted copy (same size and
+    /// time, and the same hash where the service has one), move that copy
+    /// back; otherwise download it.
+    pub(crate) async fn recover_restored(&self, d: &Drive, p: &RelPath, fp: LocalFingerprint) -> Result<Outcome> {
+        let Some(it) = self.db.item(d.id, p)? else {
+            return Ok(Outcome::Done);
+        };
+        if it.is_dir
+            || it.local_state != LocalState::Placeholder
+            || self.provider.local_status(d, p)? != LocalStatus::Placeholder
+            || self.db.pending_trash_covering(d.id, p)?.is_some()
+        {
+            // Changed again since the restore: normal sync takes over.
+            return Ok(Outcome::Done);
+        }
+        let Some(now) = self.stat_remote(d, p).await? else {
+            return Ok(Outcome::Done);
+        };
+        let unchanged = it.synced.as_ref().map(|s| self.rules(d).same(s, &now)).unwrap_or(false);
+        if unchanged {
+            if let Some(copy) = self.provider.find_deleted_copy(d, p, &fp)? {
+                if self.deleted_copy_matches(d, &copy.content, &now).await {
+                    let (dir, name) = self.stage_path(d)?;
+                    let staged = dir.join(name);
+                    self.provider.take_deleted_copy(&copy, &staged)?;
+                    let mut meta_item = it.clone();
+                    meta_item.remote = Some(now.clone());
+                    match self
+                        .provider
+                        .commit_download(d, p, &staged, &meta_item.meta(), LocalStatus::Placeholder)
+                    {
+                        Ok(new_fp) => {
+                            let mut it = it;
+                            it.remote = Some(now.clone());
+                            it.synced = Some(now);
+                            it.local_base = Some(new_fp);
+                            it.local_state = LocalState::Downloaded;
+                            it.dirty = false;
+                            self.db.upsert_item(&it)?;
+                            self.db.log_activity(
+                                Some(d.id),
+                                Some(p),
+                                "trash",
+                                &format!("Restored {p} from the Recycle Bin"),
+                                false,
+                            );
+                            return Ok(Outcome::Done);
+                        }
+                        Err(e) => {
+                            // Never lose the copy just taken back: keep it with
+                            // the recovered files, then download as usual.
+                            let keep = self.recovered_dir.join(&d.display_name).join(p.as_str());
+                            if let Some(parent) = keep.parent() {
+                                std::fs::create_dir_all(parent)?;
+                            }
+                            std::fs::rename(&staged, &keep).or_else(|_| std::fs::copy(&staged, &keep).map(|_| ()))?;
+                            let _ = std::fs::remove_file(&staged);
+                            self.db.log_activity(
+                                Some(d.id),
+                                Some(p),
+                                "trash",
+                                &format!(
+                                    "Could not put {p} back from the Recycle Bin ({e}); kept it in {} and downloading it",
+                                    keep.display()
+                                ),
+                                true,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        self.reconcile(d, p, Want::Download).await
+    }
+
+    /// Whether a deleted copy is the cloud version `now`: same size, and
+    /// the same hash when the drive compares hashes. Any doubt: no.
+    async fn deleted_copy_matches(&self, d: &Drive, content: &std::path::Path, now: &RemoteMeta) -> bool {
+        let Ok(m) = std::fs::metadata(content) else {
+            return false;
+        };
+        if now.size >= 0 && m.len() as i64 != now.size {
+            return false;
+        }
+        let (Some(ht), Some(want)) = (&d.hash_type, &now.hash) else {
+            return true;
+        };
+        let (Some(dir), Some(name)) = (content.parent(), content.file_name()) else {
+            return false;
+        };
+        match self
+            .api
+            .hashsum_file(&dir.display().to_string(), &name.to_string_lossy(), ht)
+            .await
+        {
+            Ok(Some(h)) => h.eq_ignore_ascii_case(want),
+            _ => false,
+        }
     }
 
     fn finish_trash_rows(&self, d: &Drive, t: &TrashEntry) -> Result<()> {

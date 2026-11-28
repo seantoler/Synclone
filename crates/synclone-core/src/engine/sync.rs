@@ -188,6 +188,7 @@ impl Engine {
         let deb = self.settings.debounce_ms;
         match ev {
             E::HydrationRequested { drive, path } => {
+                self.touch_parent(drive, &path);
                 self.db
                     .enqueue_op("hydrate", drive, &path, &serde_json::json!({}), self.now())?;
             }
@@ -210,9 +211,12 @@ impl Engine {
                 self.free(drive, &path, recursive)?;
             }
             E::LocalCreated { drive, path } | E::LocalModified { drive, path } | E::LocalDeleted { drive, path } => {
+                self.touch_parent(drive, &path);
                 self.enqueue_reconcile(drive, &path, deb)?;
             }
             E::LocalRenamed { drive, from, to } => {
+                self.touch_parent(drive, &from);
+                self.touch_parent(drive, &to);
                 // Remember which cloud object (if any) was at `from` when the
                 // user renamed it: by the time the move runs, a cloud rename
                 // may have put a different item's record there.
@@ -229,6 +233,7 @@ impl Engine {
                 )?;
             }
             E::FolderEnumerated { drive, path } => {
+                self.touch_folder(drive, &path);
                 let stale = match self.db.listed_at(drive, &path)? {
                     Some(t) => self.now() - t > self.settings.relist_on_open_ms,
                     None => true,
@@ -416,6 +421,14 @@ impl Engine {
     ) -> Result<Outcome> {
         let rules = self.rules(d);
         let parent_populated = self.provider.is_populated(d, &p.parent().unwrap_or_default());
+        // What a download may replace: exactly what is on disk now. A
+        // placeholder that vanishes before the download lands was deleted
+        // by the user, so the download must not bring it back.
+        let on_disk = if local == LocalStatus::Absent {
+            LocalStatus::Absent
+        } else {
+            LocalStatus::Placeholder
+        };
         // On platforms that create placeholders on demand, "absent" in an
         // unbrowsed folder just means "not created yet".
         let local = if local == LocalStatus::Absent && !parent_populated && item.is_some() {
@@ -451,7 +464,7 @@ impl Engine {
                             .upsert_placeholders(d, &p.parent().unwrap_or_default(), &[it.meta()])?;
                     }
                     if want == Want::Download || self.pinned(d.id, p)? {
-                        return self.download(d, p, &it, LocalStatus::Placeholder, want).await;
+                        return self.download(d, p, &it, on_disk, want).await;
                     }
                 }
                 Ok(Outcome::Done)
@@ -511,7 +524,7 @@ impl Engine {
                             .upsert_placeholders(d, &p.parent().unwrap_or_default(), &[it.meta()])?;
                     }
                     if want == Want::Download || it.pinned || self.pinned(d.id, p)? {
-                        return self.download(d, p, &it, LocalStatus::Placeholder, want).await;
+                        return self.download(d, p, &it, on_disk, want).await;
                     }
                     Ok(Outcome::Done)
                 }
@@ -850,11 +863,8 @@ impl Engine {
 
     /// Download the remote version of `p` and put it in place, provided the
     /// local file still matches `expected`.
-    async fn download(&self, d: &Drive, p: &RelPath, it: &Item, expected: LocalStatus, _want: Want) -> Result<Outcome> {
-        if d.paused {
-            return Ok(self.defer("paused"));
-        }
-        let r = it.remote.clone().ok_or_else(|| anyhow!("{p} is not in the cloud"))?;
+    /// A fresh staging file for drive `d`: (folder, file name).
+    pub(crate) fn stage_path(&self, d: &Drive) -> Result<(std::path::PathBuf, String)> {
         let stage_dir = self.staging_dir.join(d.id.to_string());
         std::fs::create_dir_all(&stage_dir)?;
         let stage_name = format!(
@@ -862,6 +872,15 @@ impl Engine {
             std::process::id(),
             STAGING_SEQ.fetch_add(1, Ordering::Relaxed)
         );
+        Ok((stage_dir, stage_name))
+    }
+
+    async fn download(&self, d: &Drive, p: &RelPath, it: &Item, expected: LocalStatus, _want: Want) -> Result<Outcome> {
+        if d.paused {
+            return Ok(self.defer("paused"));
+        }
+        let r = it.remote.clone().ok_or_else(|| anyhow!("{p} is not in the cloud"))?;
+        let (stage_dir, stage_name) = self.stage_path(d)?;
         let staged = stage_dir.join(&stage_name);
         let result = async {
             self.api

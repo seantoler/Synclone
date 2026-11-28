@@ -12,7 +12,7 @@ pub mod provider;
 pub mod types;
 
 pub use engine::{Clock, Engine, EngineSettings, SystemClock, TestClock};
-pub use provider::{LocalEntry, NameRules, Provider, ProviderEvent};
+pub use provider::{DeletedCopy, LocalEntry, NameRules, Provider, ProviderEvent};
 pub use types::*;
 
 /// The product name. Change it here and nowhere else.

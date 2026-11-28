@@ -68,6 +68,14 @@ impl Config {
         if let Some(ms) = std::env::var("SYNCLONE_DEBOUNCE_MS").ok().and_then(|s| s.parse().ok()) {
             settings.debounce_ms = ms;
         }
+        // `SYNCLONE_HOT_POLL_SECS`: seconds between checks of open and
+        // recently used folders; 0 turns them off (D-031).
+        if let Some(s) = std::env::var("SYNCLONE_HOT_POLL_SECS")
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+        {
+            settings.hot_poll_secs = Some(s);
+        }
         // `SYNCLONE_ONLY_REMOTES`: comma-separated rclone remotes; only these
         // become drives on import (a trial against test aliases, D-030).
         settings.only_remotes = std::env::var("SYNCLONE_ONLY_REMOTES").ok().and_then(|v| {
@@ -282,10 +290,19 @@ impl Daemon {
                             Ok(r) if r.changes() > 0 => self.wake.notify_one(),
                             Ok(_) => {}
                             Err(e) => {
+                                if synclone_core::engine::index::is_rate_limited(&e) {
+                                    self.engine.note_rate_limited(d.id);
+                                }
                                 tracing::warn!("checking {} for changes: {e:#}", d.display_name);
                                 let _ = self.engine.db.set_last_poll(d.id, self.engine.now());
                             }
                         }
+                    }
+                    // Open and recently used folders, more often (D-031).
+                    match self.engine.poll_hot(d.id).await {
+                        Ok(r) if r.polled.changes() > 0 || r.full_poll_requested => self.wake.notify_one(),
+                        Ok(_) => {}
+                        Err(e) => tracing::warn!("checking open folders of {}: {e:#}", d.display_name),
                     }
                 }
             }
