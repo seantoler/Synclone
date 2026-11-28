@@ -9,7 +9,13 @@
 //! Plus convergence: after quiescence every local file has the same content
 //! as the remote file at the same path, and no op is left failed.
 //!
-//! Case count: `PROPTEST_CASES` (default 10 000, as the Phase 3 exit asks).
+//! Seeds (D-028): by default the cases come from [`FIXED_SEEDS`], so a pull
+//! request runs the same 10 000 cases every time (`PROPTEST_CASES`, split
+//! across the seeds), after the saved cases: [`REGRESSIONS`] and the seeds
+//! in `property.proptest-regressions`. `SYNCLONE_PROPTEST_SEED=random`
+//! draws a fresh seed (the nightly workflow); a number replays that seed.
+//! On failure the seed and the shrunk case are printed and, if
+//! `SYNCLONE_PROPTEST_REPORT` names a file, written there.
 
 mod common;
 
@@ -449,6 +455,46 @@ impl World {
     }
 }
 
+/// Seeds pull requests run. Changing this list changes which cases CI
+/// covers; add a seed, don't replace one that once failed.
+const FIXED_SEEDS: &[u64] = &[0x5ec1_0e01, 0x5ec1_0e02, 0x5ec1_0e03, 0x5ec1_0e04];
+
+/// Saved shrunk cases, replayed exactly on every run. Each was a real
+/// failure; the note says what was fixed.
+const REGRESSIONS: &[(&str, &[Act])] = {
+    use Act::*;
+    &[
+        (
+            "model: Open must not snapshot the cloud (Windows CI)",
+            &[LocalWrite(0), Open(0), Free(0), LocalWrite(0)],
+        ),
+        (
+            "model: a poll between a placeholder rename and an overwrite of the new name (Windows CI)",
+            &[
+                LocalWrite(1),
+                EmptyTrash,
+                Free(1),
+                LocalRename(1, 3),
+                PollOnly,
+                LocalWrite(3),
+            ],
+        ),
+        (
+            "a rename onto a deleted name while the source moved in the cloud (macOS CI)",
+            &[
+                LocalWrite(0),
+                LocalWrite(2),
+                Sync,
+                LocalDelete(0),
+                Sync,
+                LocalWrite(3),
+                RemoteRename(2, 3),
+                LocalRename(2, 0),
+            ],
+        ),
+    ]
+};
+
 fn cases() -> u32 {
     std::env::var("PROPTEST_CASES")
         .ok()
@@ -456,47 +502,75 @@ fn cases() -> u32 {
         .unwrap_or(10_000)
 }
 
-proptest! {
-    #![proptest_config(ProptestConfig { cases: cases(), max_shrink_iters: 2000, ..ProptestConfig::default() })]
-
-    #[test]
-    fn no_content_is_ever_lost(acts in proptest::collection::vec(act(), 1..24)) {
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-        rt.block_on(async {
-            let mut w = World::new().await;
-            for a in &acts {
-                w.apply(a).await;
-            }
-            w.quiesce().await;
-            w.check(&acts);
-        });
+fn seeds() -> Vec<u64> {
+    match std::env::var("SYNCLONE_PROPTEST_SEED").ok().as_deref().map(str::trim) {
+        None | Some("") | Some("fixed") => FIXED_SEEDS.to_vec(),
+        Some("random") => {
+            use std::hash::{BuildHasher, Hasher};
+            let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+            h.write_u128(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+            );
+            vec![h.finish()]
+        }
+        Some(n) => vec![n.parse().expect("SYNCLONE_PROPTEST_SEED is fixed, random or a number")],
     }
 }
 
-/// Shrunk case from CI (windows-latest): a poll between a placeholder
-/// rename and an overwrite of the new name made the model forget what the
-/// placeholder stood for. The engine was right; the model is fixed.
-#[test]
-fn regression_free_rename_poll_write() {
-    use Act::*;
-    let acts = [
-        LocalWrite(1),
-        EmptyTrash,
-        Free(1),
-        LocalRename(1, 3),
-        PollOnly,
-        LocalWrite(3),
-    ];
+fn run_case(acts: &[Act]) {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap();
     rt.block_on(async {
         let mut w = World::new().await;
-        for a in &acts {
+        for a in acts {
             w.apply(a).await;
         }
         w.quiesce().await;
-        w.check(&acts);
+        w.check(acts);
     });
+}
+
+#[test]
+fn saved_regression_cases() {
+    for (note, acts) in REGRESSIONS {
+        eprintln!("replaying: {note}");
+        run_case(acts);
+    }
+}
+
+#[test]
+fn no_content_is_ever_lost() {
+    use proptest::test_runner::{Config, FileFailurePersistence, RngSeed, TestRunner};
+    let seeds = seeds();
+    let per_seed = (cases() / seeds.len() as u32).max(1);
+    for seed in seeds {
+        eprintln!("property test: seed {seed}, {per_seed} cases");
+        let mut runner = TestRunner::new(Config {
+            cases: per_seed,
+            max_shrink_iters: 2000,
+            rng_seed: RngSeed::Fixed(seed),
+            source_file: Some(file!()),
+            failure_persistence: Some(Box::new(FileFailurePersistence::SourceParallel("proptest-regressions"))),
+            ..Config::default()
+        });
+        let strategy = proptest::collection::vec(act(), 1..24);
+        if let Err(e) = runner.run(&strategy, |acts| {
+            run_case(&acts);
+            Ok(())
+        }) {
+            let report = format!(
+                "seed: {seed}\ncases: {per_seed}\nreplay: SYNCLONE_PROPTEST_SEED={seed} PROPTEST_CASES={per_seed} \
+                 cargo test -p synclone-provider-stub --test property no_content_is_ever_lost\n{e}\n"
+            );
+            if let Some(f) = std::env::var_os("SYNCLONE_PROPTEST_REPORT") {
+                std::fs::write(f, &report).unwrap();
+            }
+            panic!("property test failed\n{report}");
+        }
+    }
 }
